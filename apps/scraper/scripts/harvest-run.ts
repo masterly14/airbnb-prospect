@@ -25,6 +25,7 @@ import {
   acquirePlaywrightMutex,
   getHarvestSearchOffset,
   getNextMarketIndex,
+  getNextZoneIndex,
   releasePlaywrightMutex,
   setHarvestSearchOffset,
 } from '../src/persistence/system-state'
@@ -345,26 +346,46 @@ async function harvestSingleMarket(
     report.markets.push(market.name)
   }
 
-  // Offset de paginación persistido por mercado: cada corrida avanza a
-  // inventario nuevo. Al superar el tope se reinicia desde el principio.
-  const maxOffset = Number.parseInt(process.env.HARVEST_SEARCH_MAX_OFFSET ?? '255', 10)
-  let itemsOffset = await getHarvestSearchOffset(market.slug)
-  if (itemsOffset >= maxOffset) itemsOffset = 0
-
-  harvestLog('harvest.market', {
-    market: market.name,
-    itemsOffset,
-    ...mvpModeLogContext(),
-  })
-
   const { checkin, checkout } = getSearchDates(7)
-  const searchUrl = buildSearchResultsUrl({
-    slug: market.slug,
-    placeId: market.placeId,
-    checkin,
-    checkout,
-    itemsOffset,
-  })
+
+  // Estrategia de avance: rotar por zonas/barrios (query de texto libre) es lo
+  // más confiable porque Airbnb ignora `items_offset` y devuelve siempre los
+  // mismos primeros resultados. Cada corrida usa una zona distinta → inventario
+  // nuevo garantizado. Para mercados sin zonas configuradas caemos al offset.
+  const zones = market.zones ?? []
+  let searchUrl: string
+  let zoneQuery: string | null = null
+  let itemsOffset = 0
+
+  if (zones.length > 0) {
+    const zoneIndex = await getNextZoneIndex(market.slug, zones.length)
+    zoneQuery = zones[zoneIndex]
+    searchUrl = buildSearchResultsUrl({ query: zoneQuery, checkin, checkout })
+    harvestLog('harvest.market', {
+      market: market.name,
+      zone: zoneQuery,
+      zoneIndex,
+      zoneCount: zones.length,
+      ...mvpModeLogContext(),
+    })
+  } else {
+    // Offset de paginación persistido por mercado (fallback sin zonas).
+    const maxOffset = Number.parseInt(process.env.HARVEST_SEARCH_MAX_OFFSET ?? '255', 10)
+    itemsOffset = await getHarvestSearchOffset(market.slug)
+    if (itemsOffset >= maxOffset) itemsOffset = 0
+    searchUrl = buildSearchResultsUrl({
+      slug: market.slug,
+      placeId: market.placeId,
+      checkin,
+      checkout,
+      itemsOffset,
+    })
+    harvestLog('harvest.market', {
+      market: market.name,
+      itemsOffset,
+      ...mvpModeLogContext(),
+    })
+  }
 
   await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
   await dismissBlockingOverlays(page)
@@ -384,22 +405,23 @@ async function harvestSingleMarket(
 
   const listings = await scrapeSearchResultsPaginated(page)
 
-  // Avanzar el offset para la próxima corrida. Si no vino inventario, reiniciar
-  // desde el principio (offset agotado o vacío) para no quedarse en páginas
-  // profundas sin resultados.
-  if (listings.length === 0) {
-    await setHarvestSearchOffset(market.slug, 0)
-    harvestLog('harvest.offset_reset', { market: market.name, previousOffset: itemsOffset })
-  } else {
-    const step = Number.parseInt(process.env.HARVEST_SEARCH_OFFSET_STEP ?? '', 10)
-    const stepSize = Number.isFinite(step) && step > 0 ? step : listings.length
-    const nextOffset = itemsOffset + stepSize
-    await setHarvestSearchOffset(market.slug, nextOffset >= maxOffset ? 0 : nextOffset)
-    harvestLog('harvest.offset_advance', {
-      market: market.name,
-      from: itemsOffset,
-      to: nextOffset >= maxOffset ? 0 : nextOffset,
-    })
+  // Sólo en modo offset (sin zonas) avanzamos el cursor persistido.
+  if (zones.length === 0) {
+    const maxOffset = Number.parseInt(process.env.HARVEST_SEARCH_MAX_OFFSET ?? '255', 10)
+    if (listings.length === 0) {
+      await setHarvestSearchOffset(market.slug, 0)
+      harvestLog('harvest.offset_reset', { market: market.name, previousOffset: itemsOffset })
+    } else {
+      const step = Number.parseInt(process.env.HARVEST_SEARCH_OFFSET_STEP ?? '', 10)
+      const stepSize = Number.isFinite(step) && step > 0 ? step : listings.length
+      const nextOffset = itemsOffset + stepSize
+      await setHarvestSearchOffset(market.slug, nextOffset >= maxOffset ? 0 : nextOffset)
+      harvestLog('harvest.offset_advance', {
+        market: market.name,
+        from: itemsOffset,
+        to: nextOffset >= maxOffset ? 0 : nextOffset,
+      })
+    }
   }
 
   const batch = await harvestListings(page, listings, undefined, market.name)

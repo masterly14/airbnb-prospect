@@ -73,6 +73,26 @@ export async function setHarvestSearchOffset(marketKey: string, offset: number):
   })
 }
 
+const HARVEST_ZONE_INDEX_PREFIX = 'HARVEST_ZONE_INDEX:'
+
+/** Índice rotatorio de zona/barrio por mercado (una zona distinta por corrida). */
+export async function getNextZoneIndex(marketKey: string, zoneCount: number): Promise<number> {
+  if (zoneCount <= 0) return 0
+
+  const key = `${HARVEST_ZONE_INDEX_PREFIX}${marketKey}`
+  const row = await db.systemState.findUnique({ where: { key } })
+  const last = row ? Number.parseInt(row.value, 10) : -1
+  const next = Number.isFinite(last) ? (last + 1) % zoneCount : 0
+
+  await db.systemState.upsert({
+    where: { key },
+    create: { key, value: String(next) },
+    update: { value: String(next) },
+  })
+
+  return next
+}
+
 export async function getNextMarketIndex(marketCount: number): Promise<number> {
   if (marketCount <= 0) return 0
 

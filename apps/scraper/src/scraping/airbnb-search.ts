@@ -48,12 +48,19 @@ export function buildSearchResultsUrl(
     checkout,
     placeId = MEDELLIN_PLACE_ID,
     itemsOffset = 0,
+    query,
   }: {
     slug?: string
     checkin: string
     checkout: string
     placeId?: string
     itemsOffset?: number
+    /**
+     * Búsqueda por texto libre (zona/barrio). Cuando se provee, Airbnb
+     * geocodifica el texto y se omite `place_id` para no fijar la ciudad
+     * completa.
+     */
+    query?: string
   },
   baseUrl = getAirbnbBaseUrl(),
 ): string {
@@ -61,13 +68,21 @@ export function buildSearchResultsUrl(
     checkin,
     checkout,
     refinement_paths: '/homes',
-    place_id: placeId,
   })
+
+  if (query) {
+    params.set('query', query)
+  } else if (placeId) {
+    params.set('place_id', placeId)
+  }
+
   // Paginación profunda: avanzar el offset entre corridas para alcanzar
   // inventario nuevo en vez de re-prospectar los primeros resultados.
   if (itemsOffset > 0) {
     params.set('items_offset', String(itemsOffset))
     params.set('pagination_search', 'true')
   }
-  return `${baseUrl}/s/${encodeURIComponent(slug)}/homes?${params.toString()}`
+
+  const pathSlug = query ? query : slug
+  return `${baseUrl}/s/${encodeURIComponent(pathSlug)}/homes?${params.toString()}`
 }

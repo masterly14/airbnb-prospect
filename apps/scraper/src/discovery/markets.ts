@@ -4,6 +4,12 @@ export type HarvestMarket = {
   name: string
   slug: string
   placeId: string
+  /**
+   * Zonas/barrios para rotar la búsqueda con `query` de texto libre. Cada
+   * corrida usa una zona distinta → inventario nuevo sin depender de la
+   * paginación interna de Airbnb (que ignora `items_offset`).
+   */
+  zones?: string[]
 }
 
 export const HARVEST_MARKETS: HarvestMarket[] = [
@@ -11,16 +17,44 @@ export const HARVEST_MARKETS: HarvestMarket[] = [
     name: 'Medellín',
     slug: 'Medellín--Antioquia',
     placeId: 'ChIJBa0PuN8oRI4RVju1x_x8E0I',
+    zones: [
+      'El Poblado, Medellín',
+      'Laureles, Medellín',
+      'Envigado, Antioquia',
+      'Estadio, Medellín',
+      'Belén, Medellín',
+      'Sabaneta, Antioquia',
+      'Provenza, Medellín',
+      'Ciudad del Río, Medellín',
+      'La América, Medellín',
+    ],
   },
   {
     name: 'Bogotá',
     slug: 'Bogotá--Colombia',
     placeId: 'ChIJW4W14q1aP44RQVz3aA6qPQw',
+    zones: [
+      'Chapinero, Bogotá',
+      'Usaquén, Bogotá',
+      'Chicó, Bogotá',
+      'Zona Rosa, Bogotá',
+      'Teusaquillo, Bogotá',
+      'Cedritos, Bogotá',
+      'La Candelaria, Bogotá',
+      'Santa Bárbara, Bogotá',
+      'Parque 93, Bogotá',
+    ],
   },
   {
     name: 'Cali',
     slug: 'Cali--Valle-del-Cauca',
     placeId: 'ChIJ2-_J8Cw9QI4R2fRSlU0C7k0',
+    zones: [
+      'Granada, Cali',
+      'San Fernando, Cali',
+      'El Peñón, Cali',
+      'Ciudad Jardín, Cali',
+    ],
   },
   {
     name: 'Bucaramanga',
