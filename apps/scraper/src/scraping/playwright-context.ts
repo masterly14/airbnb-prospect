@@ -34,6 +34,11 @@ export function accountSessionPath(accountId: string): string {
   return path.resolve(__dirname, `../../playwright/.auth/account-${accountId}.json`)
 }
 
+/** Por defecto red directa. Proxy residencial solo con PLAYWRIGHT_USE_ACCOUNT_PROXY=true. */
+export function shouldUseAccountProxy(): boolean {
+  return process.env.PLAYWRIGHT_USE_ACCOUNT_PROXY === 'true'
+}
+
 /**
  * Nunca cae a la sesión legacy de otra cuenta: enviar con la identidad
  * equivocada es peor que no enviar (cross-account leakage).
@@ -54,6 +59,8 @@ export function resolveSessionPathForAccount(account: ProspectAccount): string {
 export function buildProxyOption(
   account: ProspectAccount,
 ): NonNullable<LaunchOptions['proxy']> | undefined {
+  if (!shouldUseAccountProxy()) return undefined
+
   if (!account.proxyHost || !account.proxyPort) return undefined
 
   const proxy: NonNullable<LaunchOptions['proxy']> = {
@@ -98,8 +105,9 @@ export async function launchBrowserForAccount(
   outboundLog('playwright.browser_launch', {
     accountId: account.id,
     accountLabel: account.label,
-    proxyHost: account.proxyHost ?? null,
-    proxyPort: account.proxyPort ?? null,
+    networkMode: shouldUseAccountProxy() ? 'account_proxy' : 'direct',
+    proxyHost: shouldUseAccountProxy() ? (account.proxyHost ?? null) : null,
+    proxyPort: shouldUseAccountProxy() ? (account.proxyPort ?? null) : null,
   })
 
   return chromium.launch({
