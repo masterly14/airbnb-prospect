@@ -4,14 +4,14 @@ import { KanbanBoard } from "@/components/dashboard/kanban/kanban-board"
 import { LeadFilters } from "@/components/dashboard/lead-filters"
 import { LeadDetailSheet } from "@/components/dashboard/lead-detail-sheet"
 import { ManualLeadDialog } from "@/components/dashboard/manual-lead-dialog"
-import { useEffect, useState, useTransition } from "react"
+import { Suspense, useEffect, useState, useTransition } from "react"
 import { useSearchParams } from "next/navigation"
 import { Lead, LeadFilters as FiltersType } from "@/lib/leads/types"
 import { leadRepository } from "@/lib/leads/repository"
 
 import { SidebarTrigger } from "@/components/ui/sidebar"
 
-export default function PipelinePage() {
+function PipelineContent() {
   const searchParams = useSearchParams()
   const deepLinkLeadId = searchParams.get("leadId")
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
@@ -75,5 +75,27 @@ export default function PipelinePage() {
         onClose={() => setSelectedLead(null)} 
       />
     </div>
+  )
+}
+
+export default function PipelinePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full w-full flex-col">
+          <header className="flex h-14 shrink-0 items-center border-b border-white/5 px-4">
+            <div className="flex items-center gap-2">
+              <SidebarTrigger className="md:hidden" />
+              <h1 className="text-sm font-medium">Pipeline</h1>
+            </div>
+          </header>
+          <main className="flex-1 overflow-hidden pt-4">
+            <p className="px-4 text-sm text-muted-foreground">Cargando...</p>
+          </main>
+        </div>
+      }
+    >
+      <PipelineContent />
+    </Suspense>
   )
 }

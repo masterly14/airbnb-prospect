@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useTransition } from "react"
+import { Suspense, useEffect, useState, useTransition } from "react"
 import { useSearchParams } from "next/navigation"
 import { AccountStatus } from "@repo/db/client"
 import { CheckCircle2 } from "lucide-react"
@@ -23,7 +23,7 @@ import type { ProspectAccountSummary } from "@/lib/accounts/types"
 import { format } from "date-fns"
 import { es } from "date-fns/locale"
 
-export default function AccountsSettingsPage() {
+function AccountsSettingsContent() {
   const searchParams = useSearchParams()
   const [accounts, setAccounts] = useState<ProspectAccountSummary[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -210,5 +210,27 @@ export default function AccountsSettingsPage() {
         </div>
       </main>
     </div>
+  )
+}
+
+export default function AccountsSettingsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full w-full flex-col">
+          <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/5 px-4">
+            <div className="flex items-center gap-2">
+              <SidebarTrigger className="md:hidden" />
+              <h1 className="text-sm font-medium">Cuentas de prospección</h1>
+            </div>
+          </header>
+          <main className="flex-1 overflow-auto p-6">
+            <p className="text-sm text-muted-foreground">Cargando...</p>
+          </main>
+        </div>
+      }
+    >
+      <AccountsSettingsContent />
+    </Suspense>
   )
 }
