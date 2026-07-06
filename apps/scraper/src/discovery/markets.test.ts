@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { HARVEST_MARKETS, resolveHarvestMarkets } from './markets'
+import { HARVEST_MARKETS, resolveHarvestMarketForAccount, resolveHarvestMarkets } from './markets'
 
 describe('resolveHarvestMarkets', () => {
   it('defaults to Bogotá and Medellín without Cartagena', () => {
@@ -65,5 +65,28 @@ describe('HARVEST_MARKETS', () => {
     const names = HARVEST_MARKETS.map((market) => market.name)
     assert.ok(names.includes('Cali'))
     assert.ok(names.includes('Bucaramanga'))
+  })
+})
+
+describe('resolveHarvestMarketForAccount', () => {
+  it('resolves the account-assigned city and ignores env overrides', () => {
+    process.env.HARVEST_MARKETS = 'Santa Marta'
+    const market = resolveHarvestMarketForAccount('Medellín')
+    assert.equal(market.name, 'Medellín')
+    delete process.env.HARVEST_MARKETS
+  })
+
+  it('rejects unknown account cities', () => {
+    assert.throws(
+      () => resolveHarvestMarketForAccount('Santa Marta'),
+      /ProspectAccount market "Santa Marta"/,
+    )
+  })
+
+  it('requires market to be set on the account', () => {
+    assert.throws(
+      () => resolveHarvestMarketForAccount(null),
+      /ProspectAccount.market is not set/,
+    )
   })
 })

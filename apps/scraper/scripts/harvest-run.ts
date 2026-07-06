@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { chromium } from 'playwright'
 import { harvestListings } from '../src/discovery/harvester'
-import { resolveHarvestMarkets } from '../src/discovery/markets'
+import { resolveHarvestMarketForAccount, resolveHarvestMarkets } from '../src/discovery/markets'
 import {
   HarvestAuthMissingError,
   HarvestMutexBusyError,
@@ -194,15 +194,12 @@ async function runHarvestMarkets(
   report: HarvestReport,
   accountMarket?: string | null,
 ): Promise<void> {
-  let markets = resolveHarvestMarkets()
-  const rotate = process.env.HARVEST_ROTATE_MARKETS === 'true'
+  const markets =
+    accountMarket !== undefined
+      ? [resolveHarvestMarketForAccount(accountMarket)]
+      : resolveHarvestMarkets()
 
-  if (accountMarket && !process.env.HARVEST_MARKET && !process.env.HARVEST_MARKETS) {
-    markets = markets.filter((market) => market.name === accountMarket)
-    if (markets.length === 0) {
-      throw new Error(`MVP account market "${accountMarket}" is not a valid harvest market`)
-    }
-  }
+  const rotate = process.env.HARVEST_ROTATE_MARKETS === 'true'
 
   if (rotate && markets.length > 1) {
     const index = await getNextMarketIndex(markets.length)

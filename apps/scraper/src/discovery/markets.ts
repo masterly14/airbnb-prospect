@@ -74,3 +74,29 @@ export function resolveHarvestMarkets(): HarvestMarket[] {
 
   return defaultMarkets()
 }
+
+/**
+ * Ciudad de prospección asignada a la cuenta en Neon (`ProspectAccount.market`).
+ * Tiene prioridad sobre HARVEST_MARKET / HARVEST_MARKETS en jobs con cuenta.
+ */
+export function resolveHarvestMarketForAccount(
+  market: string | null | undefined,
+): HarvestMarket {
+  const label = market?.trim()
+  if (!label) {
+    throw new Error(
+      'ProspectAccount.market is not set. Assign a city in /settings/accounts before running harvest.',
+    )
+  }
+
+  const found = HARVEST_MARKETS.find(
+    (m) => m.name.toLowerCase() === label.toLowerCase() || m.slug === label,
+  )
+  if (!found) {
+    throw new Error(
+      `ProspectAccount market "${label}" is not configured for harvest. Valid: ${HARVEST_MARKETS.map((m) => m.name).join(', ')}`,
+    )
+  }
+
+  return found
+}
