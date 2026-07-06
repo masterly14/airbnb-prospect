@@ -1,0 +1,35 @@
+# Legacy SQLite (removed — Prisma/Postgres is the source of truth)
+/data/
+/db/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Dependencies
+node_modules/
+
+# Playwright (apps/scraper)
+apps/scraper/test-results/
+apps/scraper/playwright-report/
+apps/scraper/blob-report/
+apps/scraper/playwright/.cache/
+apps/scraper/playwright/.auth/
+
+# Legacy root Playwright paths (pre-monorepo)
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+.env
+/reports/
+apps/scraper/reports/
+
+# Next.js (apps/web)
+apps/web/.next/
+
+# Browser extension (apps/extension)
+apps/extension/.output/
+apps/extension/.wxt/

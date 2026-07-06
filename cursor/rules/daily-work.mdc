@@ -1,0 +1,242 @@
+---
+description: Protocolo obligatorio para sesiones de trabajo diario. Activar cuando el usuario indica un día de trabajo, un ítem del plan, o una tarea de implementación.
+alwaysApply: false
+---
+
+# Protocolo de Trabajo Diario — Urus Capital
+
+## Cuándo se activa
+
+Este protocolo se activa cuando el usuario te da una instrucción de trabajo que referencia:
+- Un día o semana del plan (`docs/plan.md`)
+- Un módulo específico (M0–M14)
+- Una tarea de implementación concreta
+
+## Jerarquía de documentación
+
+Cuando busques información sobre qué hacer, sigue esta prioridad:
+
+1. **Código existente** — audita siempre lo que ya hay antes de crear algo nuevo. El código es la verdad sobre el estado actual del sistema.
+2. **`docs/plan.md`** — referencia de negocio y arquitectura. Úsalo para entender el POR QUÉ y el contexto de un módulo, pero no lo tomes como instrucción literal de implementación.
+3. **`README.md`** — referencia de setup y comandos disponibles.
+4. **Otros `docs/*.md`** — ADRs, workers, APIs, módulos documentados.
+
+**Regla de conflicto:** si el plan dice una cosa y el código otra, pregunta al usuario cuál prevalece. NUNCA resuelvas el conflicto en silencio.
+
+## FASE 0 — Recepción del Briefing (obligatorio)
+
+El usuario proporcionará un briefing. Puede ser:
+
+**Formato completo (ideal):**
+```
+DÍA DE TRABAJO: [fecha]
+SPRINT / SEMANA: [Sprint X, Semana Y]
+ITEM: [referencia al plan o descripción del trabajo]
+MÓDULOS: [M0, M4, etc.]
+OBSERVACIONES: [contexto adicional]
+```
+
+**Formato mínimo (también válido):**
+```
+Hoy trabajamos en [ítem/módulo]. [Observaciones si las hay].
+```
+
+Si el formato es mínimo, no pidas que lo reformatee. Trabaja con lo que te da, pero sigue el protocolo completo.
+
+## FASE 1 — Investigación Obligatoria (ANTES de escribir código)
+
+### 1.1 Leer el plan (cuando aplique)
+
+Lee el bloque correspondiente en `docs/plan.md`. Trata el texto como potencialmente desactualizado frente al código.
+
+### 1.2 Auditar el código existente
+
+**OBLIGATORIO** antes de tocar una sola línea. Explora:
+- `prisma/schema.prisma` — modelos y tablas existentes
+- `lib/` — módulos implementados (busca el directorio del módulo relevante)
+- `app/api/` — endpoints existentes
+- `lib/workers/consumer/` — handlers de jobs existentes
+- Tests en `__tests__/` del módulo relevante
+- `types/` — tipos de dominio compartidos
+
+Específicamente busca:
+- Funciones que ya hacen lo que se pide (evitar duplicación)
+- Patrones establecidos (cómo se crean handlers, cómo se encolan jobs, cómo se envían mensajes)
+- Tests que validen el comportamiento actual
+
+### 1.3 Producir informe de situación
+
+Presenta al usuario un informe corto pero concreto:
+
+```
+INFORME DE SITUACIÓN — [ítem]
+
+YA IMPLEMENTADO:
+- [archivo] — [qué hace, en 1 línea]
+
+PARCIALMENTE IMPLEMENTADO:
+- [archivo] — [qué tiene y qué le falta]
+
+NO EXISTE AÚN:
+- [lo que hay que crear]
+
+DIVERGENCIAS ENCONTRADAS:
+- [plan dice X, código hace Y]
+
+PATRONES DEL CÓDIGO ACTUAL:
+- [cómo se hacen cosas similares en el repo — para seguir la misma convención]
+```
+
+### 1.4 Hacer preguntas
+
+**OBLIGATORIO**: presentar preguntas al usuario. Las preguntas DEBEN cubrir:
+
+1. **Ambigüedades técnicas**: "Para X hay dos opciones: A o B. ¿Cuál prefieres?"
+2. **Brechas de lógica de negocio**: "El plan dice X pero no especifica Y. ¿Cómo funciona en la operativa real?"
+3. **Dependencias**: "Este ítem necesita Z que no está implementado. ¿Lo implementamos ahora o es un blocker?"
+4. **Alcance**: "El plan agrupa estas 4 tareas. ¿Las quieres todas o priorizamos?"
+
+**NUNCA asumas la respuesta. NUNCA.**
+
+## FASE 2 — Plan de Ejecución
+
+Con las respuestas del usuario, presenta un plan técnico:
+
+```
+PLAN DE EJECUCIÓN
+
+ARCHIVOS A CREAR:
+- path/to/file.ts — [qué hace, 1 línea]
+
+ARCHIVOS A MODIFICAR:
+- path/to/existing.ts — [qué cambia]
+
+SCHEMA (si aplica):
+- [nuevas tablas, campos, migraciones]
+
+ORDEN:
+1. [paso 1] — [por qué primero]
+2. [paso 2] — [dependencia con paso 1]
+
+CRITERIOS DE ACEPTACIÓN:
+- [ ] [criterio concreto y verificable]
+
+LO QUE NO SE HACE:
+- [qué se difiere y por qué]
+
+DOCUMENTACIÓN (nombre tentativo):
+- docs/<modulo-o-feature-kebab>.md — [qué cubrirá]
+```
+
+**Esperar confirmación del usuario antes de empezar.**
+
+## FASE 3 — Implementación
+
+### Reglas inquebrantables
+
+1. **Código de producción**. No stubs, no funciones vacías, no `TODO` como escape. Si algo no se puede implementar ahora, se discute en Fase 1, no se deja un placeholder.
+
+2. **Seguir patrones existentes**. Antes de inventar un patrón nuevo, verifica cómo se hace en el repo:
+   - ¿Cómo se definen handlers de consumer? → mira `lib/workers/consumer/`
+   - ¿Cómo se encolan jobs? → mira `lib/job-queue/`
+   - ¿Cómo se envían mensajes WhatsApp? → mira `lib/whatsapp/`
+   - ¿Cómo se crean API routes? → mira `app/api/`
+   - ¿Cómo se escriben tests? → mira los `__tests__/` existentes
+
+3. **Tipado estricto**. Cero `any`. Si necesitas un tipo, defínelo.
+
+4. **Tests**. Toda función de lógica de negocio lleva test. Sigue el estilo de los tests existentes (Vitest).
+
+5. **Si descubres algo que contradice el plan, PARA y pregunta**. No lo resuelvas solo.
+
+### Cuando el plan sea vago
+
+Si un ítem dice algo como "desencadenar flujo de mensajes" o "conectar con el sistema", DEBES:
+1. Identificar qué componentes concretos intervienen (qué función, qué tabla, qué evento, qué API route)
+2. Verificar cuáles ya existen
+3. Proponer la implementación concreta
+4. Esperar confirmación
+
+**NUNCA crear una implementación mínima solo para "cumplir" el ítem.**
+
+### Git — Commits (obligatorio al cerrar unidades de trabajo)
+
+Aplica la disciplina de **`.cursor/rules/init.mdc`** (Conventional Commits en español, alcance por módulo).
+
+**Formato del mensaje:**
+```
+<tipo>(<alcance>): <descripción imperativa en español>
+```
+- **Tipos:** `feat`, `fix`, `refactor`, `docs`, `test`, `chore`
+- **Alcance:** ID del módulo (`M0`–`M14`) cuando aplique, o `deps`, `ci`, etc.
+- **Reglas:** un commit = un cambio lógico atómico. Prohibido "arreglos varios", "WIP" o mezclar temas no relacionados.
+- **Rama:** si creas rama nueva, usa `<tipo>/<módulo>-<descripción-kebab-case>` (ej. `feat/M11-colaboradores-externos`).
+- **Nunca** commitear secretos, `.env`, credenciales ni tokens.
+
+**Durante la sesión:** haz commit después de cada unidad lógica completa (no dejes todo para un solo commit gigante al final), salvo que el usuario pida explícitamente lo contrario.
+
+### README.md — Actualización (obligatorio cuando aplique)
+
+Al terminar trabajo sustantivo, **actualiza `README.md`** si cambió algo de lo siguiente:
+- Comandos npm/scripts nuevos o renombrados
+- Variables de entorno (y entonces también `.env.example`)
+- Setup local, prerequisitos o flujo de arranque
+- Módulos o capacidades nuevas que el README lista como "estado del repo" (sección de alto nivel)
+
+Si el cambio es puramente interno (refactor sin impacto en uso del repo), no hace falta tocar el README.
+
+### Documentación dedicada — Archivo nuevo en `docs/` (obligatorio para entregas sustantivas)
+
+Cuando implementes una **feature o módulo nuevo**, o un cambio grande de flujo, **crea un archivo dedicado** bajo `docs/`:
+
+- **Nombre:** `docs/<tema-kebab-case>.md` (ej. `docs/colaboradores-externos.md`, `docs/dashboard-ceo-overview-api.md`)
+- **Contenido mínimo:**
+  - Qué se construyó y para qué sirve (1–2 párrafos)
+  - Rutas/archivos principales (`lib/…`, `app/api/…`, modelos Prisma si aplica)
+  - Endpoints HTTP (método, path, query/body relevante) si hay API
+  - Eventos, jobs o cron involucrados, si aplica
+  - Variables de entorno nuevas o relevantes (sin valores secretos)
+  - Cómo probarlo (comandos o pasos manuales breves)
+- Si ya existe un doc muy cercano (ej. `docs/dashboard-comercial-metricas.md`), **amplíalo** en lugar de duplicar; solo crea archivo nuevo cuando el alcance sea claramente distinto.
+
+En el **mismo PR o bloque de commits**, incluye el archivo `docs/…` (o la ampliación del doc existente) junto al código.
+
+## FASE 4 — Cierre
+
+Al final de la sesión:
+
+```
+RESUMEN — [fecha]
+
+COMMITS (convención init.mdc):
+- [hash corto] tipo(alcance): mensaje
+- …
+
+COMPLETADO:
+- [x] [qué + archivos]
+
+DOCUMENTACIÓN:
+- README: [sí/no — qué se actualizó]
+- docs/[archivo].md: [creado o actualizado — resumen de 1 línea]
+
+PENDIENTE:
+- [ ] [qué + motivo]
+
+DECISIONES TOMADAS:
+- [decisión + justificación]
+
+DEUDA TÉCNICA:
+- [qué se difirió conscientemente]
+
+SIGUIENTE SESIÓN:
+- [recomendaciones]
+```
+
+## REGLAS CARDINALES
+
+1. **Pregunta > Asumir**. Siempre.
+2. **Código de producción > código que compila**. Que funcione no basta; debe ser robusto.
+3. **El código actual puede contradecir el plan** — confírmalo con el usuario antes de sobrescribir decisiones ya implementadas.
+4. **Nunca implementes algo que no entiendas**. Si no tiene sentido técnico, cuestiónalo.
+5. **Propón mejoras**. Si encuentras una forma más simple o robusta, propónla al usuario.
+6. **Git, README y doc dedicada** forman parte del entregable cuando el trabajo es sustantivo.

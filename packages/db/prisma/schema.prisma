@@ -1,0 +1,246 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" 
+  url      = env("DATABASE_URL")
+}
+
+enum LeadStatus {
+  LEAD_DISCOVERED      // Scrapeado pero sin contactar
+  INITIAL_MSG_SENT     // Primer mensaje enviado
+  FOLLOW_UP_1_SENT     // Esperando respuesta tras 1er FU
+  FOLLOW_UP_2_SENT     // Esperando respuesta tras 2do FU
+  FOLLOW_UP_3_SENT     // Esperando respuesta tras 3er FU
+  REPLIED_IN_PROGRESS  // El lead respondió, la IA tiene el control (Pausa Cron)
+  HUMAN_TAKEOVER       // IA detectó complejidad o límite de mensajes (Requiere humano)
+  CLOSED_WON           // Agendó llamada o aceptó
+  CLOSED_LOST          // Dijo que no, o se ignoraron todos los follow-ups
+}
+
+
+enum MessageDirection {
+  INBOUND   // Mensaje del Host hacia nosotros
+  OUTBOUND  // Mensaje de la IA/Nosotros hacia el Host
+  SYSTEM    // Notas internas del sistema o resúmenes de la IA
+}
+
+enum IcpSkipReason {
+  below_min
+  above_max
+  not_superhost
+  hotel_loft
+  wrong_market
+}
+
+enum AccountStatus {
+  ACTIVE
+  COOLDOWN
+  BLOCKED
+  PENDING_GMAIL
+  PENDING_CREDENTIALS
+  VERIFYING
+}
+
+enum BlockType {
+  RATE_LIMIT
+  IDENTITY
+  CAPTCHA
+  OTHER
+}
+
+enum ContactSource {
+  OUTBOUND
+  MANUAL_SYNC
+  MANUAL_REGISTER
+  AIRBNB_PRESEND_GUARD
+  BACKFILL
+}
+
+// ------------------------------------------------------
+// MODELS
+// ------------------------------------------------------
+
+model Lead {
+  id                 String      @id @default(uuid())
+  
+  // ----------------------------------------------------
+  // IDENTIFICADORES ÚNICOS Y DEDUPLICACIÓN
+  // ----------------------------------------------------
+  hostAirbnbId       String      @unique // ID del perfil del anfitrión. Evita prospectarlo 2 veces.
+  threadId           String?     @unique // ID o URL del chat. Se llena DESPUÉS de enviar el 1er mensaje.
+  
+  // ----------------------------------------------------
+  // DATOS EXTRAÍDOS (CONTEXTO DURO PARA LA IA)
+  // ----------------------------------------------------
+  name               String      // Nombre del anfitrión
+  hostProfileUrl     String      // URL del perfil (ej. airbnb.com/users/show/12345)
+  primaryListingUrl  String      // URL del anuncio por el cual lo vamos a contactar
+  primaryListingName String?     // Título del anuncio (ej. "Villa Paraíso - Tulum")
+  totalProperties    Int         @default(1) // Cantidad de propiedades (Nuestra principal palanca de venta)
+  companyName        String?     // Nombre del Co-host o Agencia (si está visible)
+  isSuperhost        Boolean     @default(false)
+  market             String?     // Ciudad de harvest (ej. Bogotá, Medellín)
+  icpSkipReason      IcpSkipReason?
+  
+  // ----------------------------------------------------
+  // ESTADO EN EL PIPELINE
+  // ----------------------------------------------------
+  status             LeadStatus  @default(LEAD_DISCOVERED)
+  
+  // ----------------------------------------------------
+  // DATOS GENERADOS POR EL AGENTE PERFILADOR (IA)
+  // ----------------------------------------------------
+  businessScale      String?     @db.Text // Ej: "Administra 10 propiedades en la zona costa. Volumen alto."
+  painPoints         String?     @db.Text // Ej: "En sus reseñas se quejan de que tarda en responder de noche."
+  executiveSummary   String?     @db.Text // Resumen de tu Lead para tu dashboard interno
+  
+  // ----------------------------------------------------
+  // CONTROL DE TIEMPOS Y LIMITADORES (CRON & KILL SWITCH)
+  // ----------------------------------------------------
+  lastContactedAt    DateTime?   // Fecha del último mensaje enviado o recibido
+  nextFollowUpAt     DateTime?   // Fecha exacta calculada para que el Cron dispare el Follow-Up
+  
+  // Contador de respuestas consecutivas de la IA para el "Kill Switch"
+  botReplyCount      Int         @default(0)
+
+  // Métrica: true cuando un mensaje OUTBOUND incluyó cal.com
+  calLinkSent        Boolean     @default(false)
+  calBookedAt        DateTime?
+
+  // Relación con el historial de chat
+  messages           Message[]
+  calBookings        CalBooking[]
+  hostContact        HostContact?
+
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([status, nextFollowUpAt]) // Índice crucial para optimizar el Cron Job
+}
+
+
+model Message {
+  id                String           @id @default(uuid())
+  leadId            String
+  lead              Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  prospectAccountId String?
+  prospectAccount   ProspectAccount? @relation(fields: [prospectAccountId], references: [id], onDelete: SetNull)
+
+  direction   MessageDirection
+  content     String           @db.Text
+
+  // Opcional: Para saber qué agente o intención clasificó este mensaje
+  aiIntent    String?          // Ej. "Duda sobre precio", "Rechazo amable"
+
+  sentAt      DateTime         @default(now())
+
+  @@index([leadId, sentAt])
+  @@index([prospectAccountId])
+}
+
+// ------------------------------------------------------
+// CONTROL DE CONCURRENCIA (MUTEX)
+// ------------------------------------------------------
+// Tabla simple llave-valor para evitar que el Cron y el Polling 
+// abran Playwright al mismo tiempo.
+model SystemState {
+  key         String   @id // Ej: "IS_PLAYWRIGHT_RUNNING"
+  value       String       // Ej: "true" o "false"
+  updatedAt   DateTime @updatedAt
+}
+
+model CalBooking {
+  id            String   @id @default(uuid())
+  calUid        String   @unique
+  calBookingId  Int?
+  leadId        String
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  triggerEvent  String
+  startTime     DateTime
+  endTime       DateTime?
+  attendeeEmail String?
+  attendeeName  String?
+  eventTypeSlug String?
+  createdAt     DateTime @default(now())
+
+  @@index([leadId])
+}
+
+// ------------------------------------------------------
+// CUENTAS DE PROSPECCIÓN (multi-cuenta + rotación)
+// ------------------------------------------------------
+
+model ProspectAccount {
+  id                  String        @id @default(uuid())
+  label               String
+  airbnbEmail         String        @unique
+  airbnbPasswordEnc   String?
+  composioUserId      String?
+  composioConnectionId String?
+  composioConnectedAt DateTime?
+  proxyHost           String?
+  proxyPort           Int?
+  proxyUser           String?
+  proxyPassEnc        String?
+  sessionPath         String?
+  market              String?       // Ciudad objetivo de prospección (Bogotá, Medellín)
+  messagesSentToday   Int           @default(0)
+  waveMessagesSent    Int           @default(0)
+  status              AccountStatus @default(ACTIVE)
+  rateLimitedAt       DateTime?
+  cooldownUntil       DateTime?
+  lastWaveStartedAt   DateTime?
+  blockEvents         AccountBlockEvent[]
+  messages            Message[]
+  hostContacts        HostContact[]
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  @@index([status, cooldownUntil])
+}
+
+model HostContact {
+  id                    String          @id @default(uuid())
+  hostAirbnbId          String          @unique
+  leadId                String          @unique
+  lead                  Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  firstContactedAt      DateTime
+  firstContactAccountId String?
+  firstContactAccount   ProspectAccount? @relation(fields: [firstContactAccountId], references: [id], onDelete: SetNull)
+  source                ContactSource
+  createdAt             DateTime        @default(now())
+
+  @@index([firstContactAccountId])
+}
+
+model LeadIdentityAlias {
+  id          String @id @default(uuid())
+  aliasId     String @unique
+  canonicalId String
+  leadId      String?
+
+  @@index([canonicalId])
+}
+
+model DailyOutboundStats {
+  id               String   @id @default(uuid())
+  date             DateTime @db.Date
+  market           String
+  coldMessagesSent Int      @default(0)
+
+  @@unique([date, market])
+  @@index([date])
+}
+
+model AccountBlockEvent {
+  id         String          @id @default(uuid())
+  accountId  String
+  account    ProspectAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type       BlockType
+  message    String          @db.Text
+  occurredAt DateTime        @default(now())
+
+  @@index([accountId, occurredAt])
+}

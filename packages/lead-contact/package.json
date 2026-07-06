@@ -1,0 +1,21 @@
+{
+  "name": "@repo/lead-contact",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@repo/airbnb-parse": "*",
+    "@repo/db": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
+  }
+}
