@@ -84,18 +84,38 @@ export type ColdSendOptions = {
   prospectAccountId?: string
 }
 
+const COMPOSER_SELECTOR =
+  'textarea[aria-label*="mensaje"], textarea[aria-label*="message"], textarea[data-testid="message-input"], textarea[placeholder*="mensaje"], textarea[placeholder*="message"], [data-testid="thread-message-input"] textarea, form textarea'
+
+/** Sonda rápida: ¿el anuncio expone un compositor de mensaje? */
+const COMPOSER_PROBE_MS = 8_000
+
 async function findMessageComposer(page: Page) {
-  const textarea = page
-    .locator(
-      'textarea[aria-label*="mensaje"], textarea[aria-label*="message"], textarea[data-testid="message-input"], textarea[placeholder*="mensaje"], textarea[placeholder*="message"], [data-testid="thread-message-input"] textarea, form textarea',
-    )
-    .first()
+  const textarea = page.locator(COMPOSER_SELECTOR).first()
 
   if (await textarea.isVisible({ timeout: 5_000 }).catch(() => false)) {
     return textarea
   }
 
   return page.locator('textarea').first()
+}
+
+/**
+ * Comprueba en un tiempo corto si la página de contacto tiene un compositor
+ * (o botón de envío). Evita esperar los 15s de cada `waitFor` en anuncios no
+ * contactables (retirados, solo-reserva, layout sin mensajería).
+ */
+async function hasContactComposer(page: Page, timeoutMs = COMPOSER_PROBE_MS): Promise<boolean> {
+  const composer = page.locator(`${COMPOSER_SELECTOR}, textarea`).first()
+  if (await composer.isVisible({ timeout: timeoutMs }).catch(() => false)) {
+    return true
+  }
+
+  const sendButton = page
+    .getByRole('button', { name: /^enviar mensaje$|^send message$|^enviar$|^send$/i })
+    .or(page.locator('[data-testid="message-send-button"]'))
+    .first()
+  return sendButton.isVisible({ timeout: 1_500 }).catch(() => false)
 }
 
 async function clickSendButton(page: Page): Promise<void> {
@@ -295,6 +315,18 @@ export async function sendColdOutboundMessage(
         threadId: existingThread,
         skippedReason: 'existing_thread',
       }
+    }
+
+    // Fallar rápido si el anuncio no es contactable, en vez de agotar los 15s
+    // de cada locator de envío. Un blocker (rate limit/identidad) tiene
+    // prioridad y se propaga como AirbnbSendBlockedError.
+    if (!(await hasContactComposer(page))) {
+      await assertSendNotBlocked(page)
+      outboundLog('outbound.send.not_contactable', {
+        leadId: lead.id,
+        listingUrl: lead.primaryListingUrl,
+      })
+      return { success: false, error: 'listing_not_contactable' }
     }
 
     await typeMessageHuman(page, text)

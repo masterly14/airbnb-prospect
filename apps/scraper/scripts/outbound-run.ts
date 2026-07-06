@@ -266,7 +266,9 @@ async function sendLeadWithAccount(
       prospectAccountId: account.id,
     })
 
-    if (!result.success && result.skippedReason !== 'existing_thread') {
+    const nonRetryable =
+      result.skippedReason === 'existing_thread' || result.error === 'listing_not_contactable'
+    if (!result.success && !nonRetryable) {
       result = await sendOutboundMessage(page, freshLead, text, isCold, phase, {
         prospectAccountId: account.id,
       })
