@@ -11,7 +11,7 @@ import {
   SidebarGroup,
   SidebarGroupContent,
 } from "@/components/ui/sidebar"
-import { BarChart3, LayoutDashboard, Settings } from "lucide-react"
+import { BarChart3, KanbanSquare, LayoutDashboard, Settings } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 
@@ -33,9 +33,17 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={pathname === "/dashboard"}>
+                  <Link href="/dashboard">
+                    <LayoutDashboard className="h-4 w-4" />
+                    <span>Dashboard</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
                 <SidebarMenuButton asChild isActive={pathname === "/pipeline"}>
                   <Link href="/pipeline">
-                    <LayoutDashboard className="h-4 w-4" />
+                    <KanbanSquare className="h-4 w-4" />
                     <span>Pipeline</span>
                   </Link>
                 </SidebarMenuButton>

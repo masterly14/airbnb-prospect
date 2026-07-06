@@ -124,6 +124,25 @@
     .hide-scrollbar::-webkit-scrollbar {
         display: none;
     }
+
+    /* Dashboard: evita overflow horizontal en gráficos y tablas en móvil */
+    .dashboard-content {
+        max-width: 100%;
+    }
+    .dashboard-content [data-slot="chart"] {
+        max-width: 100%;
+        min-width: 0;
+    }
+    .dashboard-content .recharts-legend-wrapper {
+        max-width: 100%;
+    }
+    .dashboard-content .recharts-default-legend {
+        display: flex !important;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.25rem 0.75rem;
+        line-height: 1.25;
+    }
 }
 
 @layer base {
