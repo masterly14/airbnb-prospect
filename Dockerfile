@@ -28,6 +28,9 @@ COPY docs ./docs
 
 RUN mkdir -p reports apps/scraper/playwright/.auth
 
+COPY scripts/docker-worker-start.sh /app/scripts/docker-worker-start.sh
+RUN chmod +x /app/scripts/docker-worker-start.sh
+
 WORKDIR /app/apps/scraper
 EXPOSE 8080
-CMD ["npm", "run", "worker:serve"]
+CMD ["/app/scripts/docker-worker-start.sh"]

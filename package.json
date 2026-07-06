@@ -16,6 +16,7 @@
     "build:extension": "npm run build -w @repo/extension",
     "db:generate": "npm run db:generate -w @repo/db",
     "db:migrate": "npm run db:migrate -w @repo/db",
+    "db:migrate:deploy": "npm run db:migrate:deploy -w @repo/db",
     "db:push": "npm run db:push -w @repo/db",
     "db:studio": "npm run db:studio -w @repo/db",
     "test": "npm run test -w @repo/scraper",
