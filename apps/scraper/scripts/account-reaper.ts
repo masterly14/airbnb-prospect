@@ -19,7 +19,7 @@ export type AccountReaperReport = {
   accountsReset: number
 }
 
-async function maybeResetDailyMessageCounts(now = new Date()): Promise<{
+export async function maybeResetDailyMessageCounts(now = new Date()): Promise<{
   applied: boolean
   count: number
 }> {

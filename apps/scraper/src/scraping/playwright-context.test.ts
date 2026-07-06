@@ -18,6 +18,7 @@ function makeAccount(): ProspectAccount {
     proxyUser: 'user',
     proxyPassEnc: 'enc',
     sessionPath: 'playwright/.auth/account-acc-1.json',
+    sessionStateEnc: null,
     market: 'Bogotá',
     messagesSentToday: 0,
     waveMessagesSent: 0,

@@ -187,6 +187,41 @@ export async function findEligibleOutboundLeads(
   return [...followUps, ...cold]
 }
 
+/**
+ * Conteo ligero de leads fríos elegibles en cola (mismo filtro base que
+ * `findEligibleColdLeads`, sin la verificación por cluster). Lo usa el
+ * orquestador para decidir si el pipeline está bajo y debe hacer harvest.
+ */
+export async function countColdPipeline(): Promise<number> {
+  const where: {
+    status: LeadStatus
+    threadId: null
+    totalProperties: { gte: number; lte: number }
+    isSuperhost: boolean
+    icpSkipReason: null
+    businessScale?: { not: null }
+    hostContact: { is: null }
+    messages: { none: { direction: MessageDirection } }
+  } = {
+    status: LeadStatus.LEAD_DISCOVERED,
+    threadId: null,
+    totalProperties: {
+      gte: ICP.MIN_PROPERTIES,
+      lte: ICP.MAX_PROPERTIES,
+    },
+    isSuperhost: ICP.REQUIRE_SUPERHOST,
+    icpSkipReason: null,
+    hostContact: { is: null },
+    messages: { none: { direction: MessageDirection.OUTBOUND } },
+  }
+
+  if (requireEnrichment()) {
+    where.businessScale = { not: null }
+  }
+
+  return db.lead.count({ where })
+}
+
 export async function hasEligibleOutboundLeads(
   options: Pick<EligibleLeadOptions, 'excludeLeadIds' | 'market'> = {},
 ): Promise<boolean> {

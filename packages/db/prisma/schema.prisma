@@ -185,6 +185,7 @@ model ProspectAccount {
   proxyUser           String?
   proxyPassEnc        String?
   sessionPath         String?
+  sessionStateEnc     String?       // storageState (cookies/origins) cifrado; sesión sin volumen
   market              String?       // Ciudad objetivo de prospección (Bogotá, Medellín)
   messagesSentToday   Int           @default(0)
   waveMessagesSent    Int           @default(0)

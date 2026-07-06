@@ -1,11 +1,10 @@
-import fs from 'fs'
 import type { Browser, BrowserContext, Page } from 'playwright'
 import type { ProspectAccount } from '@repo/db'
 import { dismissBlockingOverlays } from '../scraping/airbnb-scraper'
 import { isSessionValid } from '../scraping/session-utils'
 import { setActivePlaywrightAccount } from '../persistence/system-state'
 import {
-  accountSessionPath,
+  accountHasStoredSession,
   createContextForAccount,
   launchBrowserForAccount,
 } from '../scraping/playwright-context'
@@ -58,9 +57,7 @@ export async function openAccountBrowserSessionWithLogin(
   })
 
   try {
-    const hasSession =
-      Boolean(account.sessionPath && fs.existsSync(account.sessionPath)) ||
-      fs.existsSync(accountSessionPath(account.id))
+    const hasSession = accountHasStoredSession(account)
 
     if (hasSession) {
       const context = await createContextForAccount(browser, account)

@@ -1,10 +1,13 @@
 import fs from 'fs'
 import path from 'path'
 import { chromium, type Browser, type BrowserContext, type LaunchOptions } from 'playwright'
-import type { ProspectAccount } from '@repo/db'
-import { decryptSecret } from '@repo/crypto'
+import { db, type ProspectAccount } from '@repo/db'
+import { decryptSecret, encryptSecret } from '@repo/crypto'
 import { getChromeChannelOption, getColombiaContextOptions } from './airbnb-context'
 import { outboundLog } from '../logging/outbound-logger'
+
+/** storageState de Playwright (cookies + origins) como objeto en memoria. */
+export type StorageState = Awaited<ReturnType<BrowserContext['storageState']>>
 
 /** La sesión de la cuenta no existe en disco: requiere re-login manual. */
 export class AccountSessionMissingError extends Error {
@@ -54,6 +57,58 @@ export function resolveSessionPathForAccount(account: ProspectAccount): string {
   }
 
   throw new AccountSessionMissingError(account.id, account.label)
+}
+
+/**
+ * ¿La cuenta tiene una sesión utilizable sin re-login?
+ * Fuente de verdad: Neon (`sessionStateEnc`); fallback a archivo local (dev).
+ * No depende de volúmenes: la sesión vive cifrada en la DB.
+ */
+export function accountHasStoredSession(account: ProspectAccount): boolean {
+  if (account.sessionStateEnc) return true
+  if (account.sessionPath && fs.existsSync(account.sessionPath)) return true
+  return fs.existsSync(accountSessionPath(account.id))
+}
+
+/**
+ * Resuelve el storageState de la cuenta priorizando Neon (objeto en memoria,
+ * cero volumen). Si no hay blob en DB, cae al archivo local (dev/legacy).
+ * Nunca reutiliza la sesión de otra cuenta (cross-account leakage).
+ */
+export function resolveSessionStateForAccount(
+  account: ProspectAccount,
+): StorageState | string {
+  if (account.sessionStateEnc) {
+    try {
+      return JSON.parse(decryptSecret(account.sessionStateEnc)) as StorageState
+    } catch (error) {
+      outboundLog('account.session_decrypt_failed', {
+        accountId: account.id,
+        accountLabel: account.label,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      // El blob está corrupto: cae al archivo o fuerza re-login.
+    }
+  }
+
+  return resolveSessionPathForAccount(account)
+}
+
+/**
+ * Persiste el storageState actual del contexto en Neon (cifrado). Se llama tras
+ * un login exitoso y, oportunamente, al cerrar, para refrescar cookies rotadas
+ * y así alargar la vida de la sesión sin intervención manual.
+ */
+export async function persistAccountSessionState(
+  accountId: string,
+  context: BrowserContext,
+): Promise<void> {
+  const state = await context.storageState()
+  const sessionStateEnc = encryptSecret(JSON.stringify(state))
+  await db.prospectAccount.update({
+    where: { id: accountId },
+    data: { sessionStateEnc },
+  })
 }
 
 export function buildProxyOption(
@@ -121,12 +176,12 @@ export async function createContextForAccount(
   browser: Browser,
   account: ProspectAccount,
 ): Promise<BrowserContext> {
-  const storageState = resolveSessionPathForAccount(account)
+  const storageState = resolveSessionStateForAccount(account)
 
   outboundLog('playwright.context_launch', {
     accountId: account.id,
     accountLabel: account.label,
-    sessionPath: storageState,
+    sessionSource: typeof storageState === 'string' ? 'file' : 'neon',
   })
 
   return browser.newContext({

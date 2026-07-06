@@ -108,9 +108,10 @@ async function hasProspectAccounts(): Promise<boolean> {
 }
 
 export async function runHarvest(
-  options: { writeReport?: boolean } = {},
+  options: { writeReport?: boolean; disconnectDb?: boolean } = {},
 ): Promise<HarvestReport> {
   const writeReport = options.writeReport ?? true
+  const disconnectDb = options.disconnectDb ?? true
   const mvpMode = isMvpSingleAccountMode()
 
   const useAccounts = await hasProspectAccounts()
@@ -160,7 +161,9 @@ export async function runHarvest(
     throw error
   } finally {
     await releasePlaywrightMutex()
-    await db.$disconnect()
+    if (disconnectDb) {
+      await db.$disconnect()
+    }
   }
 
   if (writeReport) {

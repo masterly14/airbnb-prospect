@@ -6,7 +6,7 @@ import { decryptSecret } from '@repo/crypto'
 import type { ProspectAccount } from '@repo/db'
 import { loginAirbnb, type AccountAuthConfig } from '../../tests/helpers/airbnb-auth'
 import { getColombiaContextOptions } from '../scraping/airbnb-context'
-import { accountSessionPath } from '../scraping/playwright-context'
+import { accountSessionPath, persistAccountSessionState } from '../scraping/playwright-context'
 import { outboundLog } from '../logging/outbound-logger'
 
 /**
@@ -109,10 +109,15 @@ export async function loginAccountAndSaveSession(
   fs.mkdirSync(path.dirname(sessionPath), { recursive: true })
   await context.storageState({ path: sessionPath })
 
+  // Fuente de verdad: Neon. El archivo queda solo como conveniencia de dev;
+  // la sesión sobrevive reinicios sin volumen porque vive cifrada en la DB.
+  await persistAccountSessionState(account.id, context)
+
   outboundLog('account.auto_login_success', {
     accountId: account.id,
     accountLabel: account.label,
     sessionPath,
+    persistedToNeon: true,
   })
 
   return { context, page, sessionPath }

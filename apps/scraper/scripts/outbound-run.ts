@@ -43,7 +43,7 @@ import { OPERATIONS, isLeadOutboundEligible } from '../src/discovery/icp'
 import {
   AccountProxyConfigError,
   AccountSessionMissingError,
-  accountSessionPath,
+  accountHasStoredSession,
   createContextForAccount,
   launchBrowserForAccount,
 } from '../src/scraping/playwright-context'
@@ -157,9 +157,7 @@ async function prepareAccountContext(
   await setActivePlaywrightAccount(account.id)
   await startWave(account.id)
 
-  const hasSession = Boolean(
-    account.sessionPath && fs.existsSync(account.sessionPath),
-  ) || fs.existsSync(accountSessionPath(account.id))
+  const hasSession = accountHasStoredSession(account)
 
   if (hasSession) {
     const context = await createContextForAccount(browser, account)
@@ -379,9 +377,10 @@ async function sendLeadWithAccount(
 }
 
 export async function runOutbound(
-  options: { writeReport?: boolean } = {},
+  options: { writeReport?: boolean; disconnectDb?: boolean } = {},
 ): Promise<OutboundReport> {
   const writeReport = options.writeReport ?? true
+  const disconnectDb = options.disconnectDb ?? true
 
   const mutexAcquired = await acquirePlaywrightMutex()
   if (!mutexAcquired) {
@@ -518,7 +517,9 @@ export async function runOutbound(
     throw error
   } finally {
     await releasePlaywrightMutex()
-    await db.$disconnect()
+    if (disconnectDb) {
+      await db.$disconnect()
+    }
   }
 
   if (writeReport) {

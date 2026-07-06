@@ -20,12 +20,13 @@ import {
   HarvestMutexBusyError,
   HarvestSessionExpiredError,
 } from '../src/harvest/errors'
-import { db } from '@repo/db'
+import { db, type ProspectAccount } from '@repo/db'
 import {
-  assertAccountSessionValid,
   openAccountBrowserSession,
+  openAccountBrowserSessionWithLogin,
 } from '../src/accounts/account-browser-session'
-import { isMvpSingleAccountMode, loadMvpAccount, mvpModeLogContext } from '../src/accounts/mvp-mode'
+import { listInboundAccounts } from '../src/accounts/account-selector'
+import { isMvpSingleAccountMode, mvpModeLogContext } from '../src/accounts/mvp-mode'
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') })
 
@@ -38,6 +39,7 @@ export type InboundReport = {
   mvpMode?: boolean
   accountId?: string
   accountLabel?: string
+  accountsPolled: string[]
   polled: number
   inboundNew: number
   leadsReplied: number
@@ -52,16 +54,16 @@ export type InboundReport = {
   }>
 }
 
-export async function runInbound(
-  options: { writeReport?: boolean } = {},
-): Promise<InboundReport> {
-  const writeReport = options.writeReport ?? true
-  const mvpMode = isMvpSingleAccountMode()
-  const mvpAccount = mvpMode ? await loadMvpAccount() : null
+export type RunInboundOptions = {
+  writeReport?: boolean
+  /** Cierra la conexión Prisma al terminar (default true). El daemon lo desactiva. */
+  disconnectDb?: boolean
+}
 
-  if (!mvpMode && !fs.existsSync(AUTH_FILE)) {
-    throw new HarvestAuthMissingError()
-  }
+export async function runInbound(options: RunInboundOptions = {}): Promise<InboundReport> {
+  const writeReport = options.writeReport ?? true
+  const disconnectDb = options.disconnectDb ?? true
+  const mvpMode = isMvpSingleAccountMode()
 
   const mutexAcquired = await acquirePlaywrightMutex()
   if (!mutexAcquired) {
@@ -73,8 +75,7 @@ export async function runInbound(
   const report: InboundReport = {
     timestamp: new Date().toISOString(),
     mvpMode,
-    accountId: mvpAccount?.id,
-    accountLabel: mvpAccount?.label,
+    accountsPolled: [],
     polled: 0,
     inboundNew: 0,
     leadsReplied: 0,
@@ -83,49 +84,26 @@ export async function runInbound(
     leads: [],
   }
 
-  const browser = mvpAccount
-    ? null
-    : await chromium.launch({
-        headless: process.env.INBOUND_HEADED !== 'true',
-        ...getChromeChannelOption(),
-      })
-
   try {
-    let page
+    const accounts = await listInboundAccounts()
 
-    if (mvpAccount) {
-      const session = await openAccountBrowserSession(mvpAccount, {
-        headless: process.env.INBOUND_HEADED !== 'true',
-      })
-      await assertAccountSessionValid(session.page)
-      page = session.page
-
-      const sessionBrowser = session.browser
-      try {
-        await pollInboundLeads(page, report, mvpAccount.id)
-      } finally {
-        await sessionBrowser.close()
+    if (accounts.length > 0) {
+      report.accountId = accounts[0].id
+      report.accountLabel = accounts[0].label
+      for (const account of accounts) {
+        await pollAccountInbox(account, report)
       }
     } else {
-      const context = await browser!.newContext({
-        storageState: AUTH_FILE,
-        ...getColombiaContextOptions(),
-      })
-      page = await context.newPage()
-
-      const baseUrl = process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co'
-      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
-      await dismissBlockingOverlays(page)
-
-      if (!(await isSessionValid(page))) {
-        throw new HarvestSessionExpiredError()
+      // Modo legado sin cuentas de prospección: sesión única en disco.
+      if (!fs.existsSync(AUTH_FILE)) {
+        throw new HarvestAuthMissingError()
       }
-
-      await pollInboundLeads(page, report)
+      await pollLegacyInbox(report)
     }
 
     inboundLog('inbound.complete', {
       ...mvpModeLogContext(),
+      accountsPolled: report.accountsPolled.length,
       polled: report.polled,
       inboundNew: report.inboundNew,
       leadsReplied: report.leadsReplied,
@@ -134,11 +112,10 @@ export async function runInbound(
     inboundLog('inbound.error', { ...mvpModeLogContext(), error: String(error) })
     throw error
   } finally {
-    if (browser) {
-      await browser.close()
-    }
     await releasePlaywrightMutex()
-    await db.$disconnect()
+    if (disconnectDb) {
+      await db.$disconnect()
+    }
   }
 
   if (writeReport) {
@@ -152,17 +129,72 @@ export async function runInbound(
   return report
 }
 
-async function pollInboundLeads(
-  page: Awaited<ReturnType<typeof openAccountBrowserSession>>['page'],
+/** Poll del inbox de una cuenta usando su propia sesión (con auto-login si expiró). */
+async function pollAccountInbox(
+  account: ProspectAccount,
   report: InboundReport,
-  prospectAccountId?: string,
 ): Promise<void> {
-  const leads = await findLeadsForInboundPoll(BATCH_SIZE, prospectAccountId)
+  const leads = await findLeadsForInboundPoll(BATCH_SIZE, account.id)
+  if (leads.length === 0) return
 
-  if (leads.length === 0) {
-    console.log('No leads with threadId eligible for inbound poll.')
+  let session
+  try {
+    session = await openAccountBrowserSessionWithLogin(account, {
+      headless: process.env.INBOUND_HEADED !== 'true',
+    })
+  } catch (error) {
+    inboundLog('inbound.account_session_failed', {
+      accountId: account.id,
+      accountLabel: account.label,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    // No reventar el poll de las demás cuentas por una sesión caída.
+    return
   }
 
+  report.accountsPolled.push(account.id)
+
+  try {
+    await pollLeadThreads(session.page, report, leads)
+  } finally {
+    await session.browser.close().catch(() => {})
+  }
+}
+
+/** Modo legado: sesión única `airbnb-session.json`, sin cuentas de prospección. */
+async function pollLegacyInbox(report: InboundReport): Promise<void> {
+  const browser = await chromium.launch({
+    headless: process.env.INBOUND_HEADED !== 'true',
+    ...getChromeChannelOption(),
+  })
+
+  try {
+    const context = await browser.newContext({
+      storageState: AUTH_FILE,
+      ...getColombiaContextOptions(),
+    })
+    const page = await context.newPage()
+
+    const baseUrl = process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co'
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await dismissBlockingOverlays(page)
+
+    if (!(await isSessionValid(page))) {
+      throw new HarvestSessionExpiredError()
+    }
+
+    const leads = await findLeadsForInboundPoll(BATCH_SIZE)
+    await pollLeadThreads(page, report, leads)
+  } finally {
+    await browser.close()
+  }
+}
+
+async function pollLeadThreads(
+  page: Awaited<ReturnType<typeof openAccountBrowserSession>>['page'],
+  report: InboundReport,
+  leads: Awaited<ReturnType<typeof findLeadsForInboundPoll>>,
+): Promise<void> {
   for (const lead of leads) {
     report.polled++
 

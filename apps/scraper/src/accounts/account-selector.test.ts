@@ -2,8 +2,11 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { AccountStatus, type ProspectAccount } from '@repo/db'
 import {
+  accountCanEstablishSession,
+  accountNextAvailableAt,
   getDailyMessageCap,
   isAccountEligibleForPick,
+  nextColombiaMidnightUtc,
   sortAccountsForPick,
 } from './account-selector'
 import { OPERATIONS } from '../discovery/icp'
@@ -22,6 +25,7 @@ function makeAccount(
     proxyUser: null,
     proxyPassEnc: null,
     sessionPath: 'playwright/.auth/account-test.json',
+    sessionStateEnc: null,
     market: 'Bogotá',
     messagesSentToday: 0,
     waveMessagesSent: 0,
@@ -72,7 +76,7 @@ describe('account selector', () => {
     assert.equal(isAccountEligibleForPick(underCap, now), true)
   })
 
-  it('excludes accounts without a session path', () => {
+  it('excludes accounts without a session nor credentials to auto-login', () => {
     const noSession = makeAccount({
       id: 'ns',
       label: 'NoSession',
@@ -80,6 +84,32 @@ describe('account selector', () => {
       sessionPath: null,
     })
     assert.equal(isAccountEligibleForPick(noSession, now), false)
+  })
+
+  it('is eligible via a DB session blob even without a session path', () => {
+    const dbSession = makeAccount({
+      id: 'dbsess',
+      label: 'DbSession',
+      airbnbEmail: 'dbsess@test.com',
+      sessionPath: null,
+      sessionStateEnc: 'enc-blob',
+    })
+    assert.equal(accountCanEstablishSession(dbSession), true)
+    assert.equal(isAccountEligibleForPick(dbSession, now), true)
+  })
+
+  it('is eligible via credentials (auto-login) with no session yet', () => {
+    const freshWithCreds = makeAccount({
+      id: 'creds',
+      label: 'Creds',
+      airbnbEmail: 'creds@test.com',
+      sessionPath: null,
+      sessionStateEnc: null,
+      airbnbPasswordEnc: 'enc-pass',
+      composioConnectionId: 'conn_123',
+    })
+    assert.equal(accountCanEstablishSession(freshWithCreds), true)
+    assert.equal(isAccountEligibleForPick(freshWithCreds, now), true)
   })
 
   it('excludes accounts without a market', () => {
@@ -149,5 +179,60 @@ describe('account selector', () => {
     assert.equal(eligible.length, 4)
     assert.equal(eligible[0].id, '2')
     assert.equal(eligible.some((account) => account.id === '3'), false)
+  })
+})
+
+describe('account availability scheduling', () => {
+  const now = new Date('2026-07-04T12:00:00Z')
+
+  it('returns now for an active account under the daily cap', () => {
+    const account = makeAccount({ id: 'a', label: 'A', airbnbEmail: 'a@test.com' })
+    assert.equal(accountNextAvailableAt(account, now)?.getTime(), now.getTime())
+  })
+
+  it('returns cooldownUntil for a cooled-down account', () => {
+    const cooldownUntil = new Date('2026-07-04T18:00:00Z')
+    const account = makeAccount({
+      id: 'c',
+      label: 'C',
+      airbnbEmail: 'c@test.com',
+      status: AccountStatus.COOLDOWN,
+      cooldownUntil,
+    })
+    assert.equal(accountNextAvailableAt(account, now)?.getTime(), cooldownUntil.getTime())
+  })
+
+  it('returns next Colombia midnight when at the daily cap', () => {
+    const account = makeAccount({
+      id: 'cap',
+      label: 'Cap',
+      airbnbEmail: 'cap@test.com',
+      messagesSentToday: getDailyMessageCap(),
+    })
+    const at = accountNextAvailableAt(account, now)
+    // 2026-07-04 12:00Z → próxima medianoche Colombia = 2026-07-05 05:00Z
+    assert.equal(at?.toISOString(), '2026-07-05T05:00:00.000Z')
+  })
+
+  it('returns null for blocked accounts (never auto-available)', () => {
+    const account = makeAccount({
+      id: 'b',
+      label: 'B',
+      airbnbEmail: 'b@test.com',
+      status: AccountStatus.BLOCKED,
+    })
+    assert.equal(accountNextAvailableAt(account, now), null)
+  })
+
+  it('computes next Colombia midnight in UTC (offset -5, no DST)', () => {
+    assert.equal(
+      nextColombiaMidnightUtc(new Date('2026-07-04T12:00:00Z')).toISOString(),
+      '2026-07-05T05:00:00.000Z',
+    )
+    // 03:00Z del día 5 sigue siendo día 4 en Colombia (22:00) → medianoche = 5 a las 05:00Z
+    assert.equal(
+      nextColombiaMidnightUtc(new Date('2026-07-05T03:00:00Z')).toISOString(),
+      '2026-07-05T05:00:00.000Z',
+    )
   })
 })

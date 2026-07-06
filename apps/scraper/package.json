@@ -10,7 +10,7 @@
     "inbound:run": "tsx scripts/inbound-run.ts",
     "sync:accounts": "tsx scripts/sync-account-conversations.ts",
     "enrich:run": "tsx scripts/enrich-leads.ts",
-    "worker:serve": "tsx src/server/worker-http.ts",
+    "worker:serve": "tsx src/server/worker-daemon.ts",
     "test:unit": "node --import tsx --test src/**/*.test.ts",
     "test": "playwright test",
     "test:ui": "playwright test --ui",

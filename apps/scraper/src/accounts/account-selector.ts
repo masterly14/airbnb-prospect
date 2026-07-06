@@ -8,6 +8,45 @@ export function getDailyMessageCap(): number {
   return OPERATIONS.MSGS_PER_WAVE * OPERATIONS.WAVES_PER_DAY_TARGET
 }
 
+function autoLoginEnabled(): boolean {
+  return process.env.OUTBOUND_AUTO_LOGIN !== 'false'
+}
+
+/**
+ * ¿La cuenta puede operar sin intervención manual? Basta con que tenga una
+ * sesión persistida (en Neon o archivo) o credenciales para auto-loguearse.
+ * Así una cuenta recién creada (con credenciales) entra a rotación y hace su
+ * primer login sola, sin depender de volúmenes ni de subir la sesión a mano.
+ */
+export function accountCanEstablishSession(account: ProspectAccount): boolean {
+  if (account.sessionStateEnc) return true
+  if (account.sessionPath) return true
+  if (autoLoginEnabled() && account.airbnbPasswordEnc && account.composioConnectionId) {
+    return true
+  }
+  return false
+}
+
+/** Fragmento Prisma equivalente a `accountCanEstablishSession` (sesión o credenciales). */
+function sessionOrCredentialsWhere() {
+  return {
+    OR: [
+      { sessionStateEnc: { not: null } },
+      { sessionPath: { not: null } },
+      ...(autoLoginEnabled()
+        ? [
+            {
+              AND: [
+                { airbnbPasswordEnc: { not: null } },
+                { composioConnectionId: { not: null } },
+              ],
+            },
+          ]
+        : []),
+    ],
+  }
+}
+
 export function isAccountEligibleForPick(
   account: ProspectAccount,
   now = new Date(),
@@ -21,7 +60,7 @@ export function isAccountEligibleForPick(
     return false
   }
 
-  if (!account.sessionPath) return false
+  if (!accountCanEstablishSession(account)) return false
   if (!account.market) return false
 
   if (account.messagesSentToday >= getDailyMessageCap()) return false
@@ -61,11 +100,13 @@ export async function pickNextAccount(
   const candidates = await db.prospectAccount.findMany({
     where: {
       status: { in: [AccountStatus.ACTIVE, AccountStatus.COOLDOWN] },
-      sessionPath: { not: null },
       market: { not: null },
       messagesSentToday: { lt: getDailyMessageCap() },
       ...(excludeAccountIds.length > 0 ? { id: { notIn: excludeAccountIds } } : {}),
-      OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
+      AND: [
+        { OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }] },
+        sessionOrCredentialsWhere(),
+      ],
     },
   })
 
@@ -113,6 +154,116 @@ export async function completeWave(
       cooldownUntil: addHours(from, OPERATIONS.COOLDOWN_HOURS),
       waveMessagesSent: 0,
     },
+  })
+}
+
+/** Colombia no tiene DST: offset fijo UTC-5. */
+const COLOMBIA_UTC_OFFSET_HOURS = -5
+
+/** Próxima medianoche de Colombia (cuando se resetea `messagesSentToday`), en UTC. */
+export function nextColombiaMidnightUtc(now = new Date()): Date {
+  const offsetMs = COLOMBIA_UTC_OFFSET_HOURS * 60 * 60 * 1000
+  const colombiaNow = new Date(now.getTime() + offsetMs)
+  const nextMidnightColombiaMs = Date.UTC(
+    colombiaNow.getUTCFullYear(),
+    colombiaNow.getUTCMonth(),
+    colombiaNow.getUTCDate() + 1,
+    0,
+    0,
+    0,
+    0,
+  )
+  return new Date(nextMidnightColombiaMs - offsetMs)
+}
+
+/**
+ * Momento en que una cuenta (con sesión y mercado) vuelve a estar disponible:
+ * - ahora mismo si está activa y bajo el tope diario → `now`
+ * - al vencer el cooldown si está en COOLDOWN
+ * - en el reset diario de Colombia si alcanzó el tope de mensajes del día
+ * Devuelve `null` si la cuenta nunca podrá elegirse (bloqueada, sin sesión, etc.).
+ */
+export function accountNextAvailableAt(
+  account: ProspectAccount,
+  now = new Date(),
+): Date | null {
+  if (account.status === AccountStatus.BLOCKED) return null
+  if (
+    account.status === AccountStatus.PENDING_CREDENTIALS ||
+    account.status === AccountStatus.PENDING_GMAIL ||
+    account.status === AccountStatus.VERIFYING
+  ) {
+    return null
+  }
+  if (!accountCanEstablishSession(account) || !account.market) return null
+
+  if (account.messagesSentToday >= getDailyMessageCap()) {
+    return nextColombiaMidnightUtc(now)
+  }
+
+  if (
+    account.status === AccountStatus.COOLDOWN &&
+    account.cooldownUntil &&
+    account.cooldownUntil > now
+  ) {
+    return account.cooldownUntil
+  }
+
+  return now
+}
+
+/**
+ * Milisegundos hasta que la próxima cuenta esté disponible (el "momento de
+ * desbloqueo" que usa el orquestador para dormir sin depender de crons).
+ * - `0` si ya hay una cuenta lista ahora.
+ * - `null` si ninguna cuenta podrá estar disponible (todas bloqueadas/sin sesión).
+ */
+export async function computeNextAvailabilityMs(now = new Date()): Promise<number | null> {
+  if (isMvpSingleAccountMode()) {
+    const account = await loadMvpAccount().catch(() => null)
+    if (!account) return null
+    const at = accountNextAvailableAt(account, now)
+    return at ? Math.max(0, at.getTime() - now.getTime()) : null
+  }
+
+  const accounts = await db.prospectAccount.findMany({
+    where: {
+      market: { not: null },
+      status: { in: [AccountStatus.ACTIVE, AccountStatus.COOLDOWN] },
+      ...sessionOrCredentialsWhere(),
+    },
+  })
+
+  let soonest: number | null = null
+  for (const account of accounts) {
+    const at = accountNextAvailableAt(account, now)
+    if (!at) continue
+    const ms = Math.max(0, at.getTime() - now.getTime())
+    if (ms === 0) return 0
+    soonest = soonest === null ? ms : Math.min(soonest, ms)
+  }
+
+  return soonest
+}
+
+/**
+ * Cuentas aptas para *leer* inbox (no gated por cooldown/tope diario: leer
+ * respuestas no consume cuota de envío). Requiere sesión y no estar bloqueada.
+ */
+export async function listInboundAccounts(): Promise<ProspectAccount[]> {
+  if (isMvpSingleAccountMode()) {
+    const account = await loadMvpAccount().catch(() => null)
+    return account ? [account] : []
+  }
+
+  return db.prospectAccount.findMany({
+    where: {
+      status: {
+        in: [AccountStatus.ACTIVE, AccountStatus.COOLDOWN],
+      },
+      ...sessionOrCredentialsWhere(),
+    },
+    orderBy: { createdAt: 'asc' },
   })
 }
 
