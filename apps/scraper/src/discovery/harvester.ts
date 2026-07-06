@@ -133,6 +133,7 @@ export async function harvestListingLead(
       companyName: stats.companyName,
       isSuperhost: stats.isSuperhost,
       market,
+      hostListingNames: stats.listingTitles,
     },
     { harvestContext },
   )

@@ -341,6 +341,44 @@ export type HostProfileStats = {
   companyName?: string
   confidence: PropertyCountConfidence
   isSuperhost: boolean
+  /** Títulos visibles en la grilla del perfil (muestra para detectar branding homogéneo). */
+  listingTitles: string[]
+}
+
+async function collectProfileListingTitles(page: Page): Promise<string[]> {
+  const links = page.locator('a[href*="/rooms/"]')
+  const count = await links.count()
+  const seen = new Set<string>()
+  const titles: string[] = []
+
+  for (let i = 0; i < count; i++) {
+    const link = links.nth(i)
+    const href = (await link.getAttribute('href')) ?? ''
+    const match = href.match(/\/rooms\/(\d+)/)
+    if (!match || seen.has(match[1])) continue
+    seen.add(match[1])
+
+    const card = link.locator('xpath=ancestor::div[@itemprop="itemListElement"][1]')
+    const cardScope = (await card.count()) > 0 ? card : link.locator('xpath=ancestor::div[3]')
+
+    const raw =
+      (await link.getAttribute('aria-label')) ??
+      (await cardScope.locator('[data-testid="listing-card-title"]').innerText().catch(() => '')) ??
+      (await link.innerText().catch(() => '')) ??
+      ''
+
+    const title = raw.trim().split('\n')[0]?.trim()
+    if (title) titles.push(title)
+  }
+
+  return titles
+}
+
+async function scrollProfileListingsGrid(page: Page): Promise<void> {
+  await page.mouse.wheel(0, 1_200)
+  await page.waitForTimeout(800)
+  await page.mouse.wheel(0, 1_800)
+  await page.waitForTimeout(800)
 }
 
 async function collectUniqueRoomIds(page: Page): Promise<number> {
@@ -358,15 +396,8 @@ async function collectUniqueRoomIds(page: Page): Promise<number> {
 }
 
 async function countProfileListingCards(page: Page): Promise<number> {
-  await page.mouse.wheel(0, 1_200)
-  await page.waitForTimeout(800)
-  const firstPass = await collectUniqueRoomIds(page)
-
-  await page.mouse.wheel(0, 1_800)
-  await page.waitForTimeout(800)
-  const secondPass = await collectUniqueRoomIds(page)
-
-  return Math.max(firstPass, secondPass)
+  await scrollProfileListingsGrid(page)
+  return collectUniqueRoomIds(page)
 }
 
 export async function scrapeHostProfileStats(page: Page): Promise<HostProfileStats> {
@@ -405,7 +436,9 @@ export async function scrapeHostProfileStats(page: Page): Promise<HostProfileSta
 
     const bodyText = await page.locator('body').innerText()
     const regexCount = parseTotalPropertiesFromText(bodyText)
-    const gridCount = await countProfileListingCards(page)
+    await scrollProfileListingsGrid(page)
+    const gridCount = await collectUniqueRoomIds(page)
+    const listingTitles = await collectProfileListingTitles(page)
     const resolved = resolveTotalProperties({
       graphql: graphqlCount,
       regex: regexCount,
@@ -422,6 +455,7 @@ export async function scrapeHostProfileStats(page: Page): Promise<HostProfileSta
       confidence: resolved.confidence,
       companyName: companyMatch?.[1]?.trim(),
       isSuperhost,
+      listingTitles,
     }
   } finally {
     page.off('response', onResponse)

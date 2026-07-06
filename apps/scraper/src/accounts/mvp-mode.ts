@@ -4,19 +4,20 @@ import { OPERATIONS } from '../discovery/icp'
 /** Cuenta Michell — default operativa para el MVP de una sola cuenta. */
 export const DEFAULT_MVP_ACCOUNT_ID = '69b667ad-a532-444e-a084-44ac7943daa8'
 
-export function getMvpAccountId(): string | null {
-  const explicit = process.env.MVP_ACCOUNT_ID?.trim()
-  if (explicit) return explicit
-
-  if (process.env.MVP_SINGLE_ACCOUNT === 'true') {
-    return DEFAULT_MVP_ACCOUNT_ID
-  }
-
-  return null
+/**
+ * El interruptor del modo MVP es `MVP_SINGLE_ACCOUNT`. `MVP_ACCOUNT_ID` sólo
+ * elige *cuál* cuenta usar cuando el modo está activo; por sí solo no enciende
+ * el MVP (así `MVP_SINGLE_ACCOUNT=false` apaga la rotación única aunque quede
+ * un `MVP_ACCOUNT_ID` configurado en el entorno).
+ */
+export function isMvpSingleAccountMode(): boolean {
+  return process.env.MVP_SINGLE_ACCOUNT === 'true'
 }
 
-export function isMvpSingleAccountMode(): boolean {
-  return getMvpAccountId() !== null
+export function getMvpAccountId(): string | null {
+  if (!isMvpSingleAccountMode()) return null
+  const explicit = process.env.MVP_ACCOUNT_ID?.trim()
+  return explicit || DEFAULT_MVP_ACCOUNT_ID
 }
 
 export function getProspectAccountTarget(): number {

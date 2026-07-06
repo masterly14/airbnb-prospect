@@ -26,7 +26,22 @@ describe('mvp-mode', () => {
     assert.equal(getProspectAccountTarget(), OPERATIONS.PROSPECT_ACCOUNTS)
   })
 
-  it('pins account when MVP_ACCOUNT_ID is set', () => {
+  it('ignores MVP_ACCOUNT_ID when MVP_SINGLE_ACCOUNT is not true', () => {
+    process.env.MVP_ACCOUNT_ID = 'custom-id'
+    assert.equal(isMvpSingleAccountMode(), false)
+    assert.equal(getMvpAccountId(), null)
+    assert.equal(getProspectAccountTarget(), OPERATIONS.PROSPECT_ACCOUNTS)
+  })
+
+  it('disables MVP mode when MVP_SINGLE_ACCOUNT=false even with MVP_ACCOUNT_ID set', () => {
+    process.env.MVP_SINGLE_ACCOUNT = 'false'
+    process.env.MVP_ACCOUNT_ID = 'custom-id'
+    assert.equal(isMvpSingleAccountMode(), false)
+    assert.equal(getMvpAccountId(), null)
+  })
+
+  it('pins account when MVP_SINGLE_ACCOUNT=true and MVP_ACCOUNT_ID is set', () => {
+    process.env.MVP_SINGLE_ACCOUNT = 'true'
     process.env.MVP_ACCOUNT_ID = 'custom-id'
     assert.equal(isMvpSingleAccountMode(), true)
     assert.equal(getMvpAccountId(), 'custom-id')

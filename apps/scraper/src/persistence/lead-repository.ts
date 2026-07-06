@@ -25,6 +25,7 @@ export type DiscoveredLeadInput = {
   companyName?: string | null
   isSuperhost: boolean
   market?: string | null
+  hostListingNames?: string[] | null
 }
 
 export type HarvestSkipReason =
@@ -103,6 +104,7 @@ function buildIcpInput(input: DiscoveredLeadInput, harvestContext?: HarvestConte
     primaryListingName: input.primaryListingName,
     companyName: input.companyName,
     hostBioSnippet: harvestContext?.hostBioSnippet,
+    hostListingNames: input.hostListingNames,
   }
 }
 
