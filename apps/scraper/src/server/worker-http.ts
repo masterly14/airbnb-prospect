@@ -23,12 +23,32 @@ export type WorkerHandlers = {
   accountReaper?: () => Promise<unknown>
 }
 
-export type WorkerResponseBody = {
+export type WorkerAcceptBody = {
+  ok: boolean
+  job: WorkerJob
+  status: 'accepted' | 'busy'
+  error?: string
+}
+
+/** Resultado de un job ya ejecutado (en background). Útil para logs y tests. */
+export type WorkerJobResult = {
   ok: boolean
   job: WorkerJob
   durationMs: number
   summary?: unknown
   error?: string
+}
+
+export type WorkerListenerOptions = {
+  /** Hook invocado cuando un job termina en background (éxito o error). */
+  onSettled?: (result: WorkerJobResult) => void
+}
+
+/** Jobs que usan Playwright: sólo puede correr uno a la vez en este worker. */
+const PLAYWRIGHT_JOBS = new Set<WorkerJob>(['harvest', 'enrich', 'outbound', 'inbound'])
+
+function workerLog(event: string, data: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...data }))
 }
 
 function getBearerToken(authorization: string | undefined): string | null {
@@ -58,14 +78,6 @@ function mapJobPath(pathname: string): WorkerJob | null {
     default:
       return null
   }
-}
-
-function mapErrorStatus(error: unknown): number {
-  if (error instanceof HarvestMutexBusyError) return 409
-  if (error instanceof HarvestAuthMissingError) return 503
-  if (error instanceof HarvestSessionExpiredError) return 503
-  if (error instanceof HarvestSearchBlockedError) return 503
-  return 500
 }
 
 async function maybeAlertOnError(job: WorkerJob, error: unknown): Promise<void> {
@@ -100,7 +112,35 @@ async function maybeAlertOnError(job: WorkerJob, error: unknown): Promise<void> 
   })
 }
 
-export function createWorkerRequestListener(handlers: WorkerHandlers) {
+async function runJobHandler(
+  handlers: WorkerHandlers,
+  job: WorkerJob,
+): Promise<unknown> {
+  switch (job) {
+    case 'harvest':
+      return handlers.harvest()
+    case 'enrich':
+      return handlers.enrich()
+    case 'outbound':
+      if (!handlers.outbound) throw new Error('Outbound handler not configured')
+      return handlers.outbound()
+    case 'inbound':
+      if (!handlers.inbound) throw new Error('Inbound handler not configured')
+      return handlers.inbound()
+    case 'account-reaper':
+      if (!handlers.accountReaper) throw new Error('Account reaper handler not configured')
+      return handlers.accountReaper()
+  }
+}
+
+export function createWorkerRequestListener(
+  handlers: WorkerHandlers,
+  options: WorkerListenerOptions = {},
+) {
+  // Guard en memoria: en este worker sólo corre un job Playwright a la vez.
+  // Evita que harvest y outbound choquen por el mutex de Playwright.
+  const state = { playwrightBusy: false }
+
   return async (request: http.IncomingMessage, response: http.ServerResponse) => {
     if (request.method !== 'POST') {
       response.writeHead(405, { 'Content-Type': 'application/json' })
@@ -122,55 +162,44 @@ export function createWorkerRequestListener(handlers: WorkerHandlers) {
       return
     }
 
+    const usesPlaywright = PLAYWRIGHT_JOBS.has(job)
+
+    if (usesPlaywright && state.playwrightBusy) {
+      workerLog('worker.job_busy', { job })
+      const busyBody: WorkerAcceptBody = { ok: false, job, status: 'busy', error: 'Playwright worker busy' }
+      response.writeHead(409, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify(busyBody))
+      return
+    }
+
+    if (usesPlaywright) state.playwrightBusy = true
+
     const startedAt = Date.now()
 
-    try {
-      let summary: unknown
+    // Responder de inmediato (202) y ejecutar en background: los jobs de
+    // Playwright tardan minutos y bloquearían el HTTP, produciendo timeouts
+    // ("upstream error") en la cadena QStash -> Vercel -> worker.
+    workerLog('worker.job_accepted', { job })
+    const acceptBody: WorkerAcceptBody = { ok: true, job, status: 'accepted' }
+    response.writeHead(202, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(acceptBody))
 
-      switch (job) {
-        case 'harvest':
-          summary = await handlers.harvest()
-          break
-        case 'enrich':
-          summary = await handlers.enrich()
-          break
-        case 'outbound':
-          if (!handlers.outbound) throw new Error('Outbound handler not configured')
-          summary = await handlers.outbound()
-          break
-        case 'inbound':
-          if (!handlers.inbound) throw new Error('Inbound handler not configured')
-          summary = await handlers.inbound()
-          break
-        case 'account-reaper':
-          if (!handlers.accountReaper) throw new Error('Account reaper handler not configured')
-          summary = await handlers.accountReaper()
-          break
+    void (async () => {
+      try {
+        const summary = await runJobHandler(handlers, job)
+        const durationMs = Date.now() - startedAt
+        workerLog('worker.job_complete', { job, durationMs })
+        options.onSettled?.({ ok: true, job, durationMs, summary })
+      } catch (error) {
+        const durationMs = Date.now() - startedAt
+        const message = error instanceof Error ? error.message : String(error)
+        await maybeAlertOnError(job, error)
+        workerLog('worker.job_error', { job, durationMs, error: message })
+        options.onSettled?.({ ok: false, job, durationMs, error: message })
+      } finally {
+        if (usesPlaywright) state.playwrightBusy = false
       }
-
-      const body: WorkerResponseBody = {
-        ok: true,
-        job,
-        durationMs: Date.now() - startedAt,
-        summary,
-      }
-
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify(body))
-    } catch (error) {
-      const status = mapErrorStatus(error)
-      const body: WorkerResponseBody = {
-        ok: false,
-        job,
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      }
-
-      await maybeAlertOnError(job, error)
-
-      response.writeHead(status, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify(body))
-    }
+    })()
   }
 }
 

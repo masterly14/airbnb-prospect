@@ -1,9 +1,14 @@
 import dotenv from 'dotenv'
 import fs from 'fs'
 import path from 'path'
-import { chromium } from 'playwright'
+import { chromium, type Page } from 'playwright'
+import { BlockType, db, type ProspectAccount } from '@repo/db'
 import { harvestListings } from '../src/discovery/harvester'
-import { resolveHarvestMarketForAccount, resolveHarvestMarkets } from '../src/discovery/markets'
+import {
+  resolveHarvestMarketForAccount,
+  resolveHarvestMarkets,
+  type HarvestMarket,
+} from '../src/discovery/markets'
 import {
   HarvestAuthMissingError,
   HarvestMutexBusyError,
@@ -29,12 +34,16 @@ import { dismissBlockingOverlays } from '../src/scraping/airbnb-scraper'
 import { detectPageBlockers } from '../src/scraping/blockers'
 import { isSessionValid } from '../src/scraping/session-utils'
 import { sleep } from '../src/resilience/retry'
-import { db } from '@repo/db'
+import { AccountSessionMissingError, AccountProxyConfigError } from '../src/scraping/playwright-context'
+import { AccountLoginPrerequisitesError } from '../src/accounts/account-login'
+import { openAccountBrowserSessionWithLogin } from '../src/accounts/account-browser-session'
+import { pickNextAccount } from '../src/accounts/account-selector'
+import { handleAccountBlock, markAccountSessionInvalid } from '../src/accounts/account-repository'
+import { sendAlert } from '../src/notifications/notify'
 import {
-  assertAccountSessionValid,
-  openAccountBrowserSession,
-} from '../src/accounts/account-browser-session'
-import { isMvpSingleAccountMode, loadMvpAccount, mvpModeLogContext } from '../src/accounts/mvp-mode'
+  isMvpSingleAccountMode,
+  mvpModeLogContext,
+} from '../src/accounts/mvp-mode'
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') })
 
@@ -50,6 +59,8 @@ export type HarvestReport = {
   mvpMode?: boolean
   accountId?: string
   accountLabel?: string
+  accountsUsed: string[]
+  rotations: number
   markets: string[]
   created: number
   updated: number
@@ -89,12 +100,22 @@ function writeHarvestReport(report: HarvestReport): string {
   return reportPath
 }
 
-export async function runHarvest(options: { writeReport?: boolean } = {}): Promise<HarvestReport> {
+/** ¿Hay cuentas de prospección en DB para operar por cuenta (con rotación)? */
+async function hasProspectAccounts(): Promise<boolean> {
+  if (isMvpSingleAccountMode()) return true
+  const count = await db.prospectAccount.count()
+  return count > 0
+}
+
+export async function runHarvest(
+  options: { writeReport?: boolean } = {},
+): Promise<HarvestReport> {
   const writeReport = options.writeReport ?? true
   const mvpMode = isMvpSingleAccountMode()
-  const mvpAccount = mvpMode ? await loadMvpAccount() : null
 
-  if (!mvpMode && !fs.existsSync(AUTH_FILE)) {
+  const useAccounts = await hasProspectAccounts()
+
+  if (!useAccounts && !fs.existsSync(AUTH_FILE)) {
     throw new HarvestAuthMissingError()
   }
 
@@ -104,8 +125,8 @@ export async function runHarvest(options: { writeReport?: boolean } = {}): Promi
   const report: HarvestReport = {
     timestamp: new Date().toISOString(),
     mvpMode,
-    accountId: mvpAccount?.id,
-    accountLabel: mvpAccount?.label,
+    accountsUsed: [],
+    rotations: 0,
     markets: [],
     created: 0,
     updated: 0,
@@ -118,48 +139,11 @@ export async function runHarvest(options: { writeReport?: boolean } = {}): Promi
     leads: [],
   }
 
-  const browser = mvpAccount
-    ? null
-    : await chromium.launch({
-        headless: process.env.HARVEST_HEADED !== 'true',
-        ...getChromeChannelOption(),
-      })
-
   try {
-    let page
-
-    if (mvpAccount) {
-      const session = await openAccountBrowserSession(mvpAccount, {
-        headless: process.env.HARVEST_HEADED !== 'true',
-      })
-      report.accountId = mvpAccount.id
-      report.accountLabel = mvpAccount.label
-      await assertAccountSessionValid(session.page)
-      page = session.page
-
-      // Cerrar browser al final vía session.browser
-      const sessionBrowser = session.browser
-      try {
-        await runHarvestMarkets(page, report, mvpAccount.market)
-      } finally {
-        await sessionBrowser.close()
-      }
+    if (useAccounts) {
+      await harvestWithAccountRotation(report, mvpMode)
     } else {
-      const context = await browser!.newContext({
-        storageState: AUTH_FILE,
-        ...getColombiaContextOptions(),
-      })
-      page = await context.newPage()
-
-      const baseUrl = process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co'
-      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
-      await dismissBlockingOverlays(page)
-
-      if (!(await isSessionValid(page))) {
-        throw new HarvestSessionExpiredError()
-      }
-
-      await runHarvestMarkets(page, report)
+      await harvestWithLegacySession(report)
     }
 
     harvestLog('harvest.complete', {
@@ -168,15 +152,13 @@ export async function runHarvest(options: { writeReport?: boolean } = {}): Promi
       updated: report.updated,
       skipped: report.skipped,
       enriched: report.enriched,
+      rotations: report.rotations,
     })
   } catch (error) {
     report.errors++
     harvestLog('harvest.error', { ...mvpModeLogContext(), error: String(error) })
     throw error
   } finally {
-    if (browser) {
-      await browser.close()
-    }
     await releasePlaywrightMutex()
     await db.$disconnect()
   }
@@ -189,67 +171,218 @@ export async function runHarvest(options: { writeReport?: boolean } = {}): Promi
   return report
 }
 
-async function runHarvestMarkets(
-  page: Awaited<ReturnType<typeof openAccountBrowserSession>>['page'],
+/**
+ * Recorre las cuentas elegibles hasta lograr un harvest exitoso. Ante un
+ * bloqueo de Airbnb pone la cuenta en cooldown y rota a la siguiente; si la
+ * sesión expiró intenta auto-login y, si no puede, la saca de rotación. Cuando
+ * ninguna cuenta queda elegible termina el run: el account-reaper reactivará
+ * los cooldowns vencidos para el siguiente ciclo del cron.
+ */
+async function harvestWithAccountRotation(
   report: HarvestReport,
-  accountMarket?: string | null,
+  mvpMode: boolean,
 ): Promise<void> {
-  const markets =
-    accountMarket !== undefined
-      ? [resolveHarvestMarketForAccount(accountMarket)]
-      : resolveHarvestMarkets()
+  const excluded = new Set<string>()
+  const headless = process.env.HARVEST_HEADED !== 'true'
 
-  const rotate = process.env.HARVEST_ROTATE_MARKETS === 'true'
+  while (true) {
+    const account = await pickNextAccount({ excludeAccountIds: [...excluded] })
+    if (!account) {
+      harvestLog('harvest.no_accounts', {
+        ...mvpModeLogContext(),
+        quarantined: excluded.size,
+      })
+      break
+    }
 
-  if (rotate && markets.length > 1) {
-    const index = await getNextMarketIndex(markets.length)
-    markets = [markets[index]]
+    report.accountId = account.id
+    report.accountLabel = account.label
+    if (!report.accountsUsed.includes(account.id)) {
+      report.accountsUsed.push(account.id)
+    }
+
+    // Validar el mercado de la cuenta antes de abrir navegador: si está mal
+    // configurado, no bloquear al resto de cuentas por ello.
+    let market: HarvestMarket
+    try {
+      market = resolveHarvestMarketForAccount(account.market)
+    } catch (error) {
+      excluded.add(account.id)
+      harvestLog('harvest.account_market_invalid', {
+        accountId: account.id,
+        accountLabel: account.label,
+        market: account.market,
+        error: String(error),
+      })
+      if (mvpMode) break
+      continue
+    }
+
+    let browser: Awaited<
+      ReturnType<typeof openAccountBrowserSessionWithLogin>
+    >['browser'] | null = null
+
+    try {
+      const session = await openAccountBrowserSessionWithLogin(account, { headless })
+      browser = session.browser
+
+      await harvestSingleMarket(session.page, report, market)
+
+      harvestLog('harvest.account_complete', {
+        accountId: account.id,
+        accountLabel: account.label,
+        market: market.name,
+        ...mvpModeLogContext(),
+      })
+      // Un harvest exitoso por corrida es suficiente.
+      break
+    } catch (error) {
+      if (error instanceof HarvestSearchBlockedError) {
+        const blockType =
+          error.blocker === 'captcha' ? BlockType.CAPTCHA : BlockType.OTHER
+        await handleAccountBlock(account.id, error.message, blockType)
+        if (!report.blockedMarkets.includes(market.name)) {
+          report.blockedMarkets.push(market.name)
+        }
+        excluded.add(account.id)
+        harvestLog('harvest.account_blocked_rotating', {
+          accountId: account.id,
+          accountLabel: account.label,
+          blocker: error.blocker,
+          blockType,
+        })
+        if (mvpMode) break
+        continue
+      }
+
+      if (
+        error instanceof HarvestSessionExpiredError ||
+        error instanceof AccountSessionMissingError ||
+        error instanceof AccountLoginPrerequisitesError ||
+        error instanceof AccountProxyConfigError
+      ) {
+        await markAccountSessionInvalid(account.id)
+        excluded.add(account.id)
+        harvestLog('harvest.account_quarantined', {
+          accountId: account.id,
+          accountLabel: account.label,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+        await sendAlert({
+          kind: 'SESSION_EXPIRED',
+          title: `Cuenta "${account.label}" fuera de harvest`,
+          details: {
+            accountId: account.id,
+            airbnbEmail: account.airbnbEmail,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        })
+        if (mvpMode) break
+        continue
+      }
+
+      throw error
+    } finally {
+      if (browser) {
+        await browser.close().catch(() => {})
+      }
+      report.rotations++
+    }
   }
+}
 
-  report.markets = markets.map((market) => market.name)
-  const { checkin, checkout } = getSearchDates(7)
+/** Modo legado sin cuentas de prospección: usa el archivo de sesión único. */
+async function harvestWithLegacySession(report: HarvestReport): Promise<void> {
+  const browser = await chromium.launch({
+    headless: process.env.HARVEST_HEADED !== 'true',
+    ...getChromeChannelOption(),
+  })
 
-  for (const market of markets) {
-    harvestLog('harvest.market', { market: market.name, ...mvpModeLogContext() })
-
-    const searchUrl = buildSearchResultsUrl({
-      slug: market.slug,
-      placeId: market.placeId,
-      checkin,
-      checkout,
+  try {
+    const context = await browser.newContext({
+      storageState: AUTH_FILE,
+      ...getColombiaContextOptions(),
     })
+    const page = await context.newPage()
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
+    const baseUrl = process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co'
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
     await dismissBlockingOverlays(page)
 
-    const searchBlocker = await detectPageBlockers(page)
-    if (searchBlocker === 'captcha' || searchBlocker === 'network') {
-      report.blockedMarkets.push(market.name)
-      harvestLog('harvest.market_blocked', { market: market.name, blocker: searchBlocker })
-      throw new HarvestSearchBlockedError(searchBlocker, market.name)
-    }
-    if (searchBlocker === 'session_expired') {
+    if (!(await isSessionValid(page))) {
       throw new HarvestSessionExpiredError()
     }
 
-    const listings = await scrapeSearchResultsPaginated(page)
-    const batch = await harvestListings(page, listings, undefined, market.name)
-    report.enriched += batch.enriched
-    report.enrichFailed += batch.enrichFailed
-
-    for (const result of batch.results) {
-      report.leads.push({
-        hostAirbnbId: result.hostAirbnbId,
-        name: result.name,
-        action: result.action,
-        reason: result.reason,
-      })
-
-      if (result.action === 'created') report.created++
-      else if (result.action === 'updated') report.updated++
-      else if (result.action === 'unchanged') report.unchanged++
-      else if (result.action === 'skipped') report.skipped++
+    for (const market of await resolveLegacyMarkets()) {
+      await harvestSingleMarket(page, report, market)
     }
+  } finally {
+    await browser.close()
+  }
+}
+
+async function resolveLegacyMarkets(): Promise<HarvestMarket[]> {
+  const markets = resolveHarvestMarkets()
+  const rotate = process.env.HARVEST_ROTATE_MARKETS === 'true'
+  if (rotate && markets.length > 1) {
+    const index = await getNextMarketIndex(markets.length)
+    return [markets[index]]
+  }
+  return markets
+}
+
+async function harvestSingleMarket(
+  page: Page,
+  report: HarvestReport,
+  market: HarvestMarket,
+): Promise<void> {
+  if (!report.markets.includes(market.name)) {
+    report.markets.push(market.name)
+  }
+
+  harvestLog('harvest.market', { market: market.name, ...mvpModeLogContext() })
+
+  const { checkin, checkout } = getSearchDates(7)
+  const searchUrl = buildSearchResultsUrl({
+    slug: market.slug,
+    placeId: market.placeId,
+    checkin,
+    checkout,
+  })
+
+  await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
+  await dismissBlockingOverlays(page)
+
+  const searchBlocker = await detectPageBlockers(page)
+  if (searchBlocker === 'captcha' || searchBlocker === 'network') {
+    report.blockedMarkets.push(market.name)
+    harvestLog('harvest.market_blocked', {
+      market: market.name,
+      blocker: searchBlocker,
+    })
+    throw new HarvestSearchBlockedError(searchBlocker, market.name)
+  }
+  if (searchBlocker === 'session_expired') {
+    throw new HarvestSessionExpiredError()
+  }
+
+  const listings = await scrapeSearchResultsPaginated(page)
+  const batch = await harvestListings(page, listings, undefined, market.name)
+  report.enriched += batch.enriched
+  report.enrichFailed += batch.enrichFailed
+
+  for (const result of batch.results) {
+    report.leads.push({
+      hostAirbnbId: result.hostAirbnbId,
+      name: result.name,
+      action: result.action,
+      reason: result.reason,
+    })
+
+    if (result.action === 'created') report.created++
+    else if (result.action === 'updated') report.updated++
+    else if (result.action === 'unchanged') report.unchanged++
+    else if (result.action === 'skipped') report.skipped++
   }
 }
 
