@@ -66,8 +66,8 @@ export async function findLeadsForInboundPoll(
       ...(prospectAccountId
         ? {
             OR: [
-              { prospectAccountId },
               { hostContact: { firstContactAccountId: prospectAccountId } },
+              { messages: { some: { prospectAccountId } } },
             ],
           }
         : {}),
