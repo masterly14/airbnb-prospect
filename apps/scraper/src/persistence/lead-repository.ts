@@ -108,6 +108,67 @@ function buildIcpInput(input: DiscoveredLeadInput, harvestContext?: HarvestConte
   }
 }
 
+/**
+ * Persiste un descarte por ICP para no re-scrapear el mismo host en cada
+ * corrida. Nunca toca leads que ya avanzaron en el pipeline (contactados/en
+ * curso). El `updatedAt` marca el momento del descarte para el TTL de
+ * re-evaluación (ver `findRecentIcpSkip`).
+ */
+async function cacheIcpSkip(input: DiscoveredLeadInput, reason: IcpSkipReason): Promise<void> {
+  const existing = await db.lead.findUnique({
+    where: { hostAirbnbId: input.hostAirbnbId },
+  })
+
+  if (existing && existing.status !== LeadStatus.LEAD_DISCOVERED) return
+
+  if (!existing) {
+    await db.lead.create({
+      data: {
+        hostAirbnbId: input.hostAirbnbId,
+        name: input.name,
+        hostProfileUrl: input.hostProfileUrl,
+        primaryListingUrl: input.primaryListingUrl,
+        primaryListingName: input.primaryListingName ?? null,
+        totalProperties: input.totalProperties,
+        companyName: input.companyName ?? null,
+        isSuperhost: input.isSuperhost,
+        market: input.market ?? null,
+        icpSkipReason: reason,
+        status: LeadStatus.LEAD_DISCOVERED,
+      },
+    })
+    return
+  }
+
+  await db.lead.update({
+    where: { hostAirbnbId: input.hostAirbnbId },
+    data: {
+      icpSkipReason: reason,
+      totalProperties: input.totalProperties,
+      isSuperhost: input.isSuperhost,
+      market: input.market ?? existing.market,
+    },
+  })
+}
+
+/**
+ * Busca un descarte ICP reciente (dentro del TTL) para un host. Permite al
+ * harvester saltar el scrape caro del perfil si ya sabemos que no cumple ICP.
+ */
+export async function findRecentIcpSkip(
+  hostAirbnbId: string,
+  ttlDays: number,
+): Promise<{ reason: IcpSkipReason } | null> {
+  const lead = await db.lead.findUnique({ where: { hostAirbnbId } })
+  if (!lead || !lead.icpSkipReason) return null
+  if (lead.status !== LeadStatus.LEAD_DISCOVERED) return null
+
+  const ageMs = Date.now() - lead.updatedAt.getTime()
+  if (ageMs > ttlDays * 86_400_000) return null
+
+  return { reason: lead.icpSkipReason as IcpSkipReason }
+}
+
 export async function upsertDiscoveredLead(
   input: DiscoveredLeadInput,
   options: UpsertDiscoveredLeadOptions = {},
@@ -115,6 +176,9 @@ export async function upsertDiscoveredLead(
   const icp = evaluateLeadIcp(buildIcpInput(input, options.harvestContext))
 
   if (!icp.eligible) {
+    if (icp.skipReason) {
+      await cacheIcpSkip(input, icp.skipReason)
+    }
     return {
       hostAirbnbId: input.hostAirbnbId,
       name: input.name,

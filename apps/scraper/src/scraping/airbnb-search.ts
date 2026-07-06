@@ -47,11 +47,13 @@ export function buildSearchResultsUrl(
     checkin,
     checkout,
     placeId = MEDELLIN_PLACE_ID,
+    itemsOffset = 0,
   }: {
     slug?: string
     checkin: string
     checkout: string
     placeId?: string
+    itemsOffset?: number
   },
   baseUrl = getAirbnbBaseUrl(),
 ): string {
@@ -61,5 +63,11 @@ export function buildSearchResultsUrl(
     refinement_paths: '/homes',
     place_id: placeId,
   })
+  // Paginación profunda: avanzar el offset entre corridas para alcanzar
+  // inventario nuevo en vez de re-prospectar los primeros resultados.
+  if (itemsOffset > 0) {
+    params.set('items_offset', String(itemsOffset))
+    params.set('pagination_search', 'true')
+  }
   return `${baseUrl}/s/${encodeURIComponent(slug)}/homes?${params.toString()}`
 }

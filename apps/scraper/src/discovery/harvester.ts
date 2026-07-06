@@ -1,6 +1,6 @@
 import type { Page } from 'playwright'
 import type { HarvestContext, HarvestResult } from '../persistence/lead-repository'
-import { upsertDiscoveredLead } from '../persistence/lead-repository'
+import { findRecentIcpSkip, upsertDiscoveredLead } from '../persistence/lead-repository'
 import { maybeEnrichAfterHarvest } from '../enrichment/enrich-lead'
 import { harvestLog } from '../logging/harvest-logger'
 import { withRetry } from '../resilience/retry'
@@ -18,6 +18,7 @@ import {
 } from '../scraping/airbnb-scraper'
 
 const LISTING_DELAY_MS = 2_000
+const ICP_SKIP_TTL_DAYS = Number.parseInt(process.env.HARVEST_ICP_SKIP_TTL_DAYS ?? '30', 10)
 const LISTING_RETRIES = Number.parseInt(process.env.HARVEST_LISTING_RETRIES ?? '3', 10)
 const LISTING_RETRY_DELAY_MS = Number.parseInt(
   process.env.HARVEST_LISTING_RETRY_DELAY_MS ?? '2000',
@@ -94,6 +95,26 @@ export async function harvestListingLead(
 
   const host = await extractHostFromListingPage(page)
   if (!host) return { result: null }
+
+  // Caché de descartes ICP: si este host ya fue evaluado y descartado dentro
+  // del TTL, saltar antes del scrape caro del perfil (evita el bucle de
+  // re-prospectar los mismos anuncios cada corrida).
+  const cachedSkip = await findRecentIcpSkip(host.hostAirbnbId, ICP_SKIP_TTL_DAYS)
+  if (cachedSkip) {
+    harvestLog('lead.skipped', {
+      hostAirbnbId: host.hostAirbnbId,
+      reason: cachedSkip.reason,
+      cached: true,
+    })
+    return {
+      result: {
+        hostAirbnbId: host.hostAirbnbId,
+        name: host.name,
+        action: 'skipped',
+        reason: cachedSkip.reason,
+      },
+    }
+  }
 
   const harvestContext = await collectHarvestContext(page)
 

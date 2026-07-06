@@ -53,6 +53,26 @@ export async function getActivePlaywrightAccountId(): Promise<string | null> {
   return row?.value ?? null
 }
 
+const HARVEST_OFFSET_PREFIX = 'HARVEST_SEARCH_OFFSET:'
+
+/** Offset de paginación de búsqueda persistido por mercado. */
+export async function getHarvestSearchOffset(marketKey: string): Promise<number> {
+  const row = await db.systemState.findUnique({
+    where: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}` },
+  })
+  const parsed = row ? Number.parseInt(row.value, 10) : 0
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+export async function setHarvestSearchOffset(marketKey: string, offset: number): Promise<void> {
+  const value = String(Math.max(0, offset))
+  await db.systemState.upsert({
+    where: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}` },
+    create: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}`, value },
+    update: { value },
+  })
+}
+
 export async function getNextMarketIndex(marketCount: number): Promise<number> {
   if (marketCount <= 0) return 0
 
