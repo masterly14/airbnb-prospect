@@ -257,6 +257,64 @@ export async function recordOutboundMessage(
   }
 }
 
+/** Marca `aiIntent` para contar fallos de envío en frío por lead. */
+export const COLD_SEND_FAILURE_INTENT = 'COLD_SEND_FAILURE'
+
+/**
+ * Tope de fallos de envío en frío antes de sacar el lead de la cola. Evita que
+ * un anuncio irresoluble (sin compositor, retirado, timeout de locator) se
+ * reintente en cada oleada y consuma un turno indefinidamente.
+ */
+export const MAX_COLD_SEND_FAILURES = Number.parseInt(
+  process.env.OUTBOUND_MAX_COLD_SEND_FAILURES ?? '3',
+  10,
+)
+
+export type ColdSendFailureResult = {
+  failures: number
+  quarantined: boolean
+}
+
+/**
+ * Registra un fallo de envío en frío y, al alcanzar `MAX_COLD_SEND_FAILURES`,
+ * mueve el lead a `CLOSED_LOST` para que no se vuelva a seleccionar.
+ */
+export async function registerColdSendFailure(
+  leadId: string,
+  error: string,
+): Promise<ColdSendFailureResult> {
+  await db.message.create({
+    data: {
+      leadId,
+      direction: MessageDirection.SYSTEM,
+      content: error.slice(0, 2_000),
+      aiIntent: COLD_SEND_FAILURE_INTENT,
+    },
+  })
+
+  const failures = await db.message.count({
+    where: {
+      leadId,
+      direction: MessageDirection.SYSTEM,
+      aiIntent: COLD_SEND_FAILURE_INTENT,
+    },
+  })
+
+  if (failures < MAX_COLD_SEND_FAILURES) {
+    return { failures, quarantined: false }
+  }
+
+  const lead = await db.lead.findUnique({ where: { id: leadId } })
+  if (lead && lead.status === LeadStatus.LEAD_DISCOVERED) {
+    await db.lead.update({
+      where: { id: leadId },
+      data: { status: LeadStatus.CLOSED_LOST, nextFollowUpAt: null },
+    })
+  }
+
+  return { failures, quarantined: true }
+}
+
 export type ApplyOutboundTransitionInput = {
   threadId?: string | null
   sentAt?: Date

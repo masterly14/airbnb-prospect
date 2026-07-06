@@ -14,6 +14,7 @@ import {
   hasEligibleOutboundLeads,
   phaseForStatus,
   recordOutboundMessage,
+  registerColdSendFailure,
 } from '../src/persistence/outbound-pipeline'
 import { getMarketsAtQuota } from '../src/persistence/daily-outbound-stats'
 import {
@@ -325,6 +326,18 @@ async function sendLeadWithAccount(
       action: 'failed',
       error: result.error,
     })
+
+    if (isCold) {
+      const failure = await registerColdSendFailure(freshLead.id, result.error ?? 'unknown')
+      outboundLog('outbound.cold_send_failure', {
+        leadId: freshLead.id,
+        accountId: account.id,
+        failures: failure.failures,
+        quarantined: failure.quarantined,
+        error: result.error,
+      })
+    }
+
     return 'failed'
   }
 
