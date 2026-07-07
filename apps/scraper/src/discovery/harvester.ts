@@ -131,6 +131,7 @@ export async function harvestListingLead(
       hostAirbnbId: host.hostAirbnbId,
       reason: 'properties_count_uncertain',
       totalProperties: stats.totalProperties,
+      countCandidates: stats.countCandidates,
     })
     return {
       result: {

@@ -25,6 +25,13 @@ const LISTING_COUNT_KEYS = [
   'totalListings',
   'listingsCount',
   'activeListingsCount',
+  'managedListingCount',
+  'managedListingsCount',
+  'totalListingsCount',
+  'publishedListingCount',
+  'publishedListingsCount',
+  'hostListingsCount',
+  'numListings',
 ]
 
 export function extractListingCountFromPayload(payload: unknown): number | null {
@@ -57,11 +64,15 @@ export function extractListingCountFromPayload(payload: unknown): number | null 
 }
 
 const TOTAL_PROPERTIES_PATTERNS = [
-  /(\d+)\s+(alojamientos|anuncios|listings|propiedades|listado[s]?|places|homes|hospedajes)/i,
+  /(\d+)\s+(alojamientos|anuncios|listings|propiedades|listado[s]?|places|homes|hospedajes|espacios)/i,
   /administra\s+(\d+)/i,
   /manages?\s+(\d+)/i,
   /(\d+)\s+listing[s]?\s+managed/i,
   /superhost.*?(\d+)\s+(alojamientos|listings|propiedades)/i,
+  /ver\s+(?:los\s+|todos\s+los\s+)?(\d+)\s+(?:anuncios|alojamientos)/i,
+  /mostrar\s+(?:todos\s+)?(?:los\s+)?(\d+)\s+(?:anuncios|alojamientos)/i,
+  /show\s+all\s+(\d+)\s+listing/i,
+  /(\d+)\s+(?:alojamientos|anuncios)\s+activos/i,
 ]
 
 export function parseTotalPropertiesFromText(bodyText: string): number | null {
@@ -343,6 +354,8 @@ export type HostProfileStats = {
   isSuperhost: boolean
   /** Títulos visibles en la grilla del perfil (muestra para detectar branding homogéneo). */
   listingTitles: string[]
+  /** Desglose de las señales de conteo (para diagnóstico de descartes). */
+  countCandidates: PropertyCountCandidates
 }
 
 async function collectProfileListingTitles(page: Page): Promise<string[]> {
@@ -374,11 +387,30 @@ async function collectProfileListingTitles(page: Page): Promise<string[]> {
   return titles
 }
 
-async function scrollProfileListingsGrid(page: Page): Promise<void> {
-  await page.mouse.wheel(0, 1_200)
-  await page.waitForTimeout(800)
-  await page.mouse.wheel(0, 1_800)
-  await page.waitForTimeout(800)
+/**
+ * Los perfiles nuevos de Airbnb muestran los anuncios en un carrusel/sección
+ * colapsada; sin expandirla la grilla suele reportar 1 sola tarjeta y el host
+ * se descarta erróneamente como `properties_count_uncertain`. Este helper hace
+ * clic en el control "Ver/Mostrar todos los anuncios" si existe.
+ */
+async function expandAllProfileListings(page: Page): Promise<void> {
+  const namePattern =
+    /(ver|mostrar)\s+(todos\s+)?(los\s+)?\d*\s*(anuncios|alojamientos)|show all(\s+\d+)?\s*(listings)?/i
+
+  const candidates = [
+    page.getByRole('button', { name: namePattern }),
+    page.getByRole('link', { name: namePattern }),
+  ]
+
+  for (const locator of candidates) {
+    const count = await locator.count().catch(() => 0)
+    for (let i = 0; i < count; i++) {
+      const el = locator.nth(i)
+      if (!(await el.isVisible({ timeout: 500 }).catch(() => false))) continue
+      await el.click({ timeout: 3_000 }).catch(() => {})
+      await page.waitForTimeout(1_200)
+    }
+  }
 }
 
 async function collectUniqueRoomIds(page: Page): Promise<number> {
@@ -395,9 +427,29 @@ async function collectUniqueRoomIds(page: Page): Promise<number> {
   return seen.size
 }
 
-async function countProfileListingCards(page: Page): Promise<number> {
-  await scrollProfileListingsGrid(page)
-  return collectUniqueRoomIds(page)
+/**
+ * Cuenta anuncios del perfil expandiendo la sección y haciendo scroll hasta que
+ * el número de tarjetas se estabiliza (lazy-load), para no subestimar el conteo.
+ */
+async function countProfileListingsStable(page: Page): Promise<number> {
+  await expandAllProfileListings(page)
+
+  let best = await collectUniqueRoomIds(page)
+  let stableRounds = 0
+
+  for (let i = 0; i < 12 && stableRounds < 2; i++) {
+    await page.mouse.wheel(0, 2_000)
+    await page.waitForTimeout(600)
+    const current = await collectUniqueRoomIds(page)
+    if (current <= best) {
+      stableRounds++
+    } else {
+      best = current
+      stableRounds = 0
+    }
+  }
+
+  return best
 }
 
 export async function scrapeHostProfileStats(page: Page): Promise<HostProfileStats> {
@@ -434,16 +486,16 @@ export async function scrapeHostProfileStats(page: Page): Promise<HostProfileSta
   try {
     await page.waitForTimeout(1_500)
 
+    const gridCount = await countProfileListingsStable(page)
     const bodyText = await page.locator('body').innerText()
     const regexCount = parseTotalPropertiesFromText(bodyText)
-    await scrollProfileListingsGrid(page)
-    const gridCount = await collectUniqueRoomIds(page)
     const listingTitles = await collectProfileListingTitles(page)
-    const resolved = resolveTotalProperties({
+    const candidates: PropertyCountCandidates = {
       graphql: graphqlCount,
       regex: regexCount,
       grid: gridCount,
-    })
+    }
+    const resolved = resolveTotalProperties(candidates)
 
     const companyMatch = bodyText.match(/(?:Empresa|Company|Agencia)[:\s]+([^\n]+)/i)
     const isSuperhost =
@@ -456,6 +508,7 @@ export async function scrapeHostProfileStats(page: Page): Promise<HostProfileSta
       companyName: companyMatch?.[1]?.trim(),
       isSuperhost,
       listingTitles,
+      countCandidates: candidates,
     }
   } finally {
     page.off('response', onResponse)
