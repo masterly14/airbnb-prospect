@@ -1,6 +1,6 @@
 import { db, LeadStatus, MessageDirection, type Lead } from '@repo/db'
 import { isClusterContacted, isLeadContacted, resolveLeadIdentityCluster } from '@repo/lead-contact'
-import { ICP, isLeadOutboundEligible } from '../discovery/icp'
+import { ICP, isLeadOutboundEligible, requireSuperhost } from '../discovery/icp'
 import { getMarketsAtQuota, incrementColdSent } from './daily-outbound-stats'
 
 export type OutboundPhase =
@@ -94,7 +94,7 @@ export async function findEligibleColdLeads(
     status: LeadStatus
     threadId: null
     totalProperties: { gte: number; lte: number }
-    isSuperhost: boolean
+    isSuperhost?: boolean
     icpSkipReason: null
     businessScale?: { not: null }
     market?: { notIn: string[] }
@@ -108,12 +108,14 @@ export async function findEligibleColdLeads(
       gte: ICP.MIN_PROPERTIES,
       lte: ICP.MAX_PROPERTIES,
     },
-    isSuperhost: ICP.REQUIRE_SUPERHOST,
     icpSkipReason: null,
     hostContact: { is: null },
     messages: { none: { direction: MessageDirection.OUTBOUND } },
   }
 
+  if (requireSuperhost()) {
+    where.isSuperhost = true
+  }
 
   if (requireEnrichment()) {
     where.businessScale = { not: null }
@@ -197,7 +199,7 @@ export async function countColdPipeline(): Promise<number> {
     status: LeadStatus
     threadId: null
     totalProperties: { gte: number; lte: number }
-    isSuperhost: boolean
+    isSuperhost?: boolean
     icpSkipReason: null
     businessScale?: { not: null }
     hostContact: { is: null }
@@ -209,10 +211,13 @@ export async function countColdPipeline(): Promise<number> {
       gte: ICP.MIN_PROPERTIES,
       lte: ICP.MAX_PROPERTIES,
     },
-    isSuperhost: ICP.REQUIRE_SUPERHOST,
     icpSkipReason: null,
     hostContact: { is: null },
     messages: { none: { direction: MessageDirection.OUTBOUND } },
+  }
+
+  if (requireSuperhost()) {
+    where.isSuperhost = true
   }
 
   if (requireEnrichment()) {

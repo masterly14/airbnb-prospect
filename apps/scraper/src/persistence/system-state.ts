@@ -53,44 +53,24 @@ export async function getActivePlaywrightAccountId(): Promise<string | null> {
   return row?.value ?? null
 }
 
-const HARVEST_OFFSET_PREFIX = 'HARVEST_SEARCH_OFFSET:'
+const HARVEST_PAGE_PREFIX = 'HARVEST_SEARCH_PAGE:'
 
-/** Offset de paginación de búsqueda persistido por mercado. */
-export async function getHarvestSearchOffset(marketKey: string): Promise<number> {
-  const row = await db.systemState.findUnique({
-    where: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}` },
-  })
-  const parsed = row ? Number.parseInt(row.value, 10) : 0
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
-}
-
-export async function setHarvestSearchOffset(marketKey: string, offset: number): Promise<void> {
-  const value = String(Math.max(0, offset))
-  await db.systemState.upsert({
-    where: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}` },
-    create: { key: `${HARVEST_OFFSET_PREFIX}${marketKey}`, value },
-    update: { value },
-  })
-}
-
-const HARVEST_ZONE_INDEX_PREFIX = 'HARVEST_ZONE_INDEX:'
-
-/** Índice rotatorio de zona/barrio por mercado (una zona distinta por corrida). */
-export async function getNextZoneIndex(marketKey: string, zoneCount: number): Promise<number> {
-  if (zoneCount <= 0) return 0
-
-  const key = `${HARVEST_ZONE_INDEX_PREFIX}${marketKey}`
+/** Página numerada del buscador desde la que continuar por mercado (1-based). */
+export async function getHarvestSearchPage(marketKey: string): Promise<number> {
+  const key = `${HARVEST_PAGE_PREFIX}${marketKey}`
   const row = await db.systemState.findUnique({ where: { key } })
-  const last = row ? Number.parseInt(row.value, 10) : -1
-  const next = Number.isFinite(last) ? (last + 1) % zoneCount : 0
+  const value = row ? Number.parseInt(row.value, 10) : 1
+  return Number.isFinite(value) && value >= 1 ? value : 1
+}
 
+export async function setHarvestSearchPage(marketKey: string, pageNum: number): Promise<void> {
+  const key = `${HARVEST_PAGE_PREFIX}${marketKey}`
+  const value = String(Math.max(1, pageNum))
   await db.systemState.upsert({
     where: { key },
-    create: { key, value: String(next) },
-    update: { value: String(next) },
+    create: { key, value },
+    update: { value },
   })
-
-  return next
 }
 
 export async function getNextMarketIndex(marketCount: number): Promise<number> {

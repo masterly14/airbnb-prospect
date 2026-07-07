@@ -64,6 +64,15 @@ export type IcpEvaluation = {
   skipReason?: IcpSkipReason
 }
 
+/**
+ * ¿Exigir badge de Superhost en el ICP? Por decisión de negocio ya NO se exige
+ * por defecto (dejaba fuera operadores de tamaño ideal 10-25 props sin badge).
+ * Se puede reactivar con `ICP_REQUIRE_SUPERHOST=true`.
+ */
+export function requireSuperhost(): boolean {
+  return process.env.ICP_REQUIRE_SUPERHOST === 'true'
+}
+
 export function resolveActiveMarkets(): readonly string[] {
   if (process.env.ICP_INCLUDE_OPTIONAL_MARKETS === 'true') {
     return [...ICP.MARKETS, ...ICP.OPTIONAL_MARKETS]
@@ -285,7 +294,7 @@ export function evaluateLeadIcp(input: LeadIcpInput): IcpEvaluation {
     return { eligible: false, skipReason: 'above_max' }
   }
 
-  if (ICP.REQUIRE_SUPERHOST && !input.isSuperhost) {
+  if (requireSuperhost() && !input.isSuperhost) {
     return { eligible: false, skipReason: 'not_superhost' }
   }
 

@@ -37,10 +37,20 @@ describe('evaluateLeadIcp', () => {
     assert.equal(result.skipReason, 'above_max')
   })
 
-  it('skips non-superhost when REQUIRE_SUPERHOST is true', () => {
-    const result = evaluateLeadIcp({ ...baseInput, isSuperhost: false })
-    assert.equal(result.eligible, false)
-    assert.equal(result.skipReason, 'not_superhost')
+  it('skips non-superhost only when ICP_REQUIRE_SUPERHOST=true', () => {
+    const prev = process.env.ICP_REQUIRE_SUPERHOST
+
+    process.env.ICP_REQUIRE_SUPERHOST = 'true'
+    const required = evaluateLeadIcp({ ...baseInput, isSuperhost: false })
+    assert.equal(required.eligible, false)
+    assert.equal(required.skipReason, 'not_superhost')
+
+    delete process.env.ICP_REQUIRE_SUPERHOST
+    const optional = evaluateLeadIcp({ ...baseInput, isSuperhost: false })
+    assert.equal(optional.eligible, true)
+
+    if (prev === undefined) delete process.env.ICP_REQUIRE_SUPERHOST
+    else process.env.ICP_REQUIRE_SUPERHOST = prev
   })
 
   it('skips hotel keywords in listing name', () => {

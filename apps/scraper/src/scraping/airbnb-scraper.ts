@@ -297,13 +297,16 @@ export type PaginatedScrapeOptions = {
   maxListings?: number
 }
 
+/**
+ * Scrapea los anuncios de la página de resultados **actual**. Airbnb los carga
+ * de forma perezosa, así que hace scroll hasta que el número de tarjetas se
+ * estabiliza antes de recolectar. La navegación entre páginas se hace por URL
+ * (cursor de Airbnb), no aquí.
+ */
 export async function scrapeSearchResultsPaginated(
   page: Page,
   options: PaginatedScrapeOptions = {},
 ): Promise<ScrapedListing[]> {
-  const maxPages =
-    options.maxPages ??
-    Number.parseInt(process.env.HARVEST_MAX_PAGES ?? '3', 10)
   const maxListings =
     options.maxListings ??
     Number.parseInt(process.env.HARVEST_MAX_LISTINGS ?? '20', 10)
@@ -311,37 +314,35 @@ export async function scrapeSearchResultsPaginated(
   await page.waitForLoadState('domcontentloaded')
 
   const listingLinks = page.locator('a[href*="/rooms/"]')
-  await listingLinks.first().waitFor({ timeout: 30_000 })
+  await listingLinks.first().waitFor({ timeout: 30_000 }).catch(() => {})
+
+  // Scroll hasta estabilizar la grilla (lazy-load). No cortar en la primera
+  // estabilización: Airbnb suele mostrar 1 tarjeta al cargar y el resto al
+  // hacer scroll; exigimos rondas mínimas y 2 lecturas iguales con inventario.
+  let prevCount = -1
+  let stableRounds = 0
+  const minScrollRounds = 5
+  for (let s = 0; s < 15; s++) {
+    const current = await listingLinks.count()
+    if (current === prevCount) {
+      stableRounds++
+      const enoughInventory = current >= 12 || s >= minScrollRounds
+      if (stableRounds >= 2 && enoughInventory) break
+    } else {
+      stableRounds = 0
+    }
+    prevCount = current
+    await page.mouse.wheel(0, 2_500)
+    await page.waitForTimeout(800)
+  }
 
   const listings: ScrapedListing[] = []
   const seen = new Set<string>()
+  const count = await listingLinks.count()
 
-  for (let pageNum = 0; pageNum < maxPages && listings.length < maxListings; pageNum++) {
-    const count = await listingLinks.count()
-
-    for (let i = 0; i < count && listings.length < maxListings; i++) {
-      const parsed = await parseListingFromLink(page, listingLinks.nth(i), seen)
-      if (parsed) listings.push(parsed)
-    }
-
-    if (listings.length >= maxListings) break
-
-    const prevCount = seen.size
-    await page.mouse.wheel(0, 2_000)
-    await page.waitForTimeout(1_200)
-
-    const showMore = page.getByRole('button', {
-      name: /mostrar más|show more|ver más/i,
-    })
-    if (await showMore.isVisible({ timeout: 1_500 }).catch(() => false)) {
-      await showMore.click({ timeout: 5_000 }).catch(() => {})
-      await page.waitForTimeout(1_500)
-    }
-
-    const newCount = await listingLinks.count()
-    if (newCount <= count && seen.size === prevCount) {
-      break
-    }
+  for (let i = 0; i < count && listings.length < maxListings; i++) {
+    const parsed = await parseListingFromLink(page, listingLinks.nth(i), seen)
+    if (parsed) listings.push(parsed)
   }
 
   return listings

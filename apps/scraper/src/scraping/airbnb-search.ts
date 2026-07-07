@@ -41,26 +41,38 @@ export function getSearchDates(
   return { checkin, checkout }
 }
 
+/** Anuncios por página del buscador de Airbnb (tamaño del cursor). */
+export const SEARCH_PAGE_SIZE = 18
+
+/**
+ * Cursor de paginación de Airbnb: base64 de `{section_offset, items_offset,
+ * version}`. La página N (1-based) usa `items_offset = SEARCH_PAGE_SIZE*(N-1)`.
+ * Confirmado inspeccionando el `href` del control "Siguiente" en vivo.
+ */
+export function buildSearchCursor(page: number): string {
+  const itemsOffset = SEARCH_PAGE_SIZE * Math.max(0, page - 1)
+  const payload = JSON.stringify({
+    section_offset: 0,
+    items_offset: itemsOffset,
+    version: 1,
+  })
+  return Buffer.from(payload, 'utf8').toString('base64')
+}
+
 export function buildSearchResultsUrl(
   {
     slug = MEDELLIN_SEARCH_SLUG,
     checkin,
     checkout,
     placeId = MEDELLIN_PLACE_ID,
-    itemsOffset = 0,
-    query,
+    page = 1,
   }: {
     slug?: string
     checkin: string
     checkout: string
     placeId?: string
-    itemsOffset?: number
-    /**
-     * Búsqueda por texto libre (zona/barrio). Cuando se provee, Airbnb
-     * geocodifica el texto y se omite `place_id` para no fijar la ciudad
-     * completa.
-     */
-    query?: string
+    /** Página numerada de resultados (1-based). Usa el cursor de Airbnb. */
+    page?: number
   },
   baseUrl = getAirbnbBaseUrl(),
 ): string {
@@ -70,19 +82,15 @@ export function buildSearchResultsUrl(
     refinement_paths: '/homes',
   })
 
-  if (query) {
-    params.set('query', query)
-  } else if (placeId) {
+  if (placeId) {
     params.set('place_id', placeId)
   }
 
-  // Paginación profunda: avanzar el offset entre corridas para alcanzar
-  // inventario nuevo en vez de re-prospectar los primeros resultados.
-  if (itemsOffset > 0) {
-    params.set('items_offset', String(itemsOffset))
+  // Paginación profunda vía cursor (página > 1) para recorrer todo el inventario.
+  if (page > 1) {
+    params.set('cursor', buildSearchCursor(page))
     params.set('pagination_search', 'true')
   }
 
-  const pathSlug = query ? query : slug
-  return `${baseUrl}/s/${encodeURIComponent(pathSlug)}/homes?${params.toString()}`
+  return `${baseUrl}/s/${encodeURIComponent(slug)}/homes?${params.toString()}`
 }

@@ -23,11 +23,10 @@ import {
 import { scrapeSearchResultsPaginated } from '../src/scraping/airbnb-scraper'
 import {
   acquirePlaywrightMutex,
-  getHarvestSearchOffset,
+  getHarvestSearchPage,
   getNextMarketIndex,
-  getNextZoneIndex,
   releasePlaywrightMutex,
-  setHarvestSearchOffset,
+  setHarvestSearchPage,
 } from '../src/persistence/system-state'
 import {
   getChromeChannelOption,
@@ -348,98 +347,98 @@ async function harvestSingleMarket(
 
   const { checkin, checkout } = getSearchDates(7)
 
-  // Estrategia de avance: rotar por zonas/barrios (query de texto libre) es lo
-  // más confiable porque Airbnb ignora `items_offset` y devuelve siempre los
-  // mismos primeros resultados. Cada corrida usa una zona distinta → inventario
-  // nuevo garantizado. Para mercados sin zonas configuradas caemos al offset.
-  const zones = market.zones ?? []
-  let searchUrl: string
-  let zoneQuery: string | null = null
-  let itemsOffset = 0
+  // Búsqueda por ciudad + paginación por el cursor real de Airbnb (18 anuncios
+  // por página). Cada corrida recorre `pagesPerRun` páginas desde la última
+  // visitada y persiste la siguiente, cubriendo la ciudad a fondo a lo largo de
+  // las corridas. Navegamos por URL (cursor) en vez de hacer clic en "Siguiente".
+  const pagesPerRun = Number.parseInt(process.env.HARVEST_MAX_PAGES ?? '3', 10)
+  const perPageCap = Number.parseInt(process.env.HARVEST_MAX_LISTINGS ?? '20', 10)
+  const maxPage = Number.parseInt(process.env.HARVEST_MAX_PAGE ?? '15', 10)
 
-  if (zones.length > 0) {
-    const zoneIndex = await getNextZoneIndex(market.slug, zones.length)
-    zoneQuery = zones[zoneIndex]
-    searchUrl = buildSearchResultsUrl({ query: zoneQuery, checkin, checkout })
-    harvestLog('harvest.market', {
-      market: market.name,
-      zone: zoneQuery,
-      zoneIndex,
-      zoneCount: zones.length,
-      ...mvpModeLogContext(),
-    })
-  } else {
-    // Offset de paginación persistido por mercado (fallback sin zonas).
-    const maxOffset = Number.parseInt(process.env.HARVEST_SEARCH_MAX_OFFSET ?? '255', 10)
-    itemsOffset = await getHarvestSearchOffset(market.slug)
-    if (itemsOffset >= maxOffset) itemsOffset = 0
-    searchUrl = buildSearchResultsUrl({
+  let startPage = await getHarvestSearchPage(market.slug)
+  if (startPage > maxPage) startPage = 1
+
+  let totalListings = 0
+  let pagesScraped = 0
+
+  for (let p = startPage; p < startPage + pagesPerRun && p <= maxPage; p++) {
+    const searchUrl = buildSearchResultsUrl({
       slug: market.slug,
       placeId: market.placeId,
       checkin,
       checkout,
-      itemsOffset,
+      page: p,
     })
+
     harvestLog('harvest.market', {
       market: market.name,
-      itemsOffset,
+      page: p,
       ...mvpModeLogContext(),
     })
-  }
 
-  await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
-  await dismissBlockingOverlays(page)
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
+    await dismissBlockingOverlays(page)
 
-  const searchBlocker = await detectPageBlockers(page)
-  if (searchBlocker === 'captcha' || searchBlocker === 'network') {
-    report.blockedMarkets.push(market.name)
-    harvestLog('harvest.market_blocked', {
-      market: market.name,
-      blocker: searchBlocker,
-    })
-    throw new HarvestSearchBlockedError(searchBlocker, market.name)
-  }
-  if (searchBlocker === 'session_expired') {
-    throw new HarvestSessionExpiredError()
-  }
-
-  const listings = await scrapeSearchResultsPaginated(page)
-
-  // Sólo en modo offset (sin zonas) avanzamos el cursor persistido.
-  if (zones.length === 0) {
-    const maxOffset = Number.parseInt(process.env.HARVEST_SEARCH_MAX_OFFSET ?? '255', 10)
-    if (listings.length === 0) {
-      await setHarvestSearchOffset(market.slug, 0)
-      harvestLog('harvest.offset_reset', { market: market.name, previousOffset: itemsOffset })
-    } else {
-      const step = Number.parseInt(process.env.HARVEST_SEARCH_OFFSET_STEP ?? '', 10)
-      const stepSize = Number.isFinite(step) && step > 0 ? step : listings.length
-      const nextOffset = itemsOffset + stepSize
-      await setHarvestSearchOffset(market.slug, nextOffset >= maxOffset ? 0 : nextOffset)
-      harvestLog('harvest.offset_advance', {
+    const searchBlocker = await detectPageBlockers(page)
+    if (searchBlocker === 'captcha' || searchBlocker === 'network') {
+      report.blockedMarkets.push(market.name)
+      harvestLog('harvest.market_blocked', {
         market: market.name,
-        from: itemsOffset,
-        to: nextOffset >= maxOffset ? 0 : nextOffset,
+        blocker: searchBlocker,
       })
+      throw new HarvestSearchBlockedError(searchBlocker, market.name)
+    }
+    if (searchBlocker === 'session_expired') {
+      throw new HarvestSessionExpiredError()
+    }
+
+    const listings = await scrapeSearchResultsPaginated(page, {
+      maxListings: perPageCap,
+    })
+    harvestLog('harvest.page_scraped', {
+      market: market.name,
+      page: p,
+      listings: listings.length,
+    })
+
+    if (listings.length === 0) break
+
+    totalListings += listings.length
+    pagesScraped++
+
+    const batch = await harvestListings(page, listings, undefined, market.name)
+    report.enriched += batch.enriched
+    report.enrichFailed += batch.enrichFailed
+
+    for (const result of batch.results) {
+      report.leads.push({
+        hostAirbnbId: result.hostAirbnbId,
+        name: result.name,
+        action: result.action,
+        reason: result.reason,
+      })
+
+      if (result.action === 'created') report.created++
+      else if (result.action === 'updated') report.updated++
+      else if (result.action === 'unchanged') report.unchanged++
+      else if (result.action === 'skipped') report.skipped++
     }
   }
 
-  const batch = await harvestListings(page, listings, undefined, market.name)
-  report.enriched += batch.enriched
-  report.enrichFailed += batch.enrichFailed
-
-  for (const result of batch.results) {
-    report.leads.push({
-      hostAirbnbId: result.hostAirbnbId,
-      name: result.name,
-      action: result.action,
-      reason: result.reason,
+  // Persistir la siguiente página. Si ninguna trajo inventario, reiniciar en 1.
+  if (totalListings === 0) {
+    await setHarvestSearchPage(market.slug, 1)
+    harvestLog('harvest.page_reset', { market: market.name, previousPage: startPage })
+  } else {
+    const nextPage = startPage + pagesScraped
+    const wrapped = nextPage > maxPage ? 1 : nextPage
+    await setHarvestSearchPage(market.slug, wrapped)
+    harvestLog('harvest.page_advance', {
+      market: market.name,
+      from: startPage,
+      to: wrapped,
+      listings: totalListings,
     })
-
-    if (result.action === 'created') report.created++
-    else if (result.action === 'updated') report.updated++
-    else if (result.action === 'unchanged') report.unchanged++
-    else if (result.action === 'skipped') report.skipped++
   }
 }
 
