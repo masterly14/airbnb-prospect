@@ -7,6 +7,7 @@ import {
   accountHasStoredSession,
   createContextForAccount,
   launchBrowserForAccount,
+  persistAccountSessionState,
   shouldUseAccountProxyForJob,
   type PlaywrightJob,
 } from '../scraping/playwright-context'
@@ -68,24 +69,64 @@ export async function openAccountBrowserSessionWithLogin(
 
   const job = options.job ?? 'harvest'
   const headless = options.headless ?? true
+  const jobUsesProxy = shouldUseAccountProxyForJob(job)
+  const loginUsesProxy = shouldUseAccountProxyForJob('login')
+  const accountHasProxy = Boolean(account.proxyHost && account.proxyPort)
+
   let browser = await launchBrowserForAccount(account, { headless, job })
+  let browserUsesLoginProxy = jobUsesProxy
+
+  /**
+   * Intenta abrir la sesión persistida (Neon primero, archivo como fallback)
+   * sin re-login. Si sigue viva, refresca el blob cifrado en Neon para rotar
+   * cookies y alargar su vida.
+   */
+  const tryReuseStoredSession = async (
+    candidate: Browser,
+    network: 'job' | 'login_proxy',
+  ): Promise<AccountBrowserSession | null> => {
+    if (!accountHasStoredSession(account)) return null
+
+    const context = await createContextForAccount(candidate, account)
+    const page = await context.newPage()
+
+    await page.goto(baseUrl(), { waitUntil: 'domcontentloaded' })
+    await dismissBlockingOverlays(page)
+
+    if (await isSessionValid(page)) {
+      outboundLog('account.session_reused', {
+        accountId: account.id,
+        accountLabel: account.label,
+        job,
+        network,
+      })
+      await persistAccountSessionState(account.id, context).catch(() => {})
+      return { browser: candidate, context, page }
+    }
+
+    await context.close()
+    return null
+  }
 
   try {
-    const hasSession = accountHasStoredSession(account)
+    const reused = await tryReuseStoredSession(browser, jobUsesProxy ? 'login_proxy' : 'job')
+    if (reused) return reused
 
-    if (hasSession) {
-      const context = await createContextForAccount(browser, account)
-      const page = await context.newPage()
+    // La sesión se ancla a la IP del login (proxy sticky residencial). Si el
+    // job corre en red directa (datacenter) Airbnb la muestra como invitado:
+    // revalidar por el proxy ANTES de quemar un login con OTP.
+    if (!browserUsesLoginProxy && loginUsesProxy && accountHasProxy) {
+      outboundLog('playwright.relaunch_for_session_proxy', {
+        accountId: account.id,
+        accountLabel: account.label,
+        previousJob: job,
+      })
+      await browser.close()
+      browser = await launchBrowserForAccount(account, { headless, job: 'login' })
+      browserUsesLoginProxy = true
 
-      await page.goto(baseUrl(), { waitUntil: 'domcontentloaded' })
-      await dismissBlockingOverlays(page)
-
-      if (await isSessionValid(page)) {
-        return { browser, context, page }
-      }
-
-      // Sesión en disco pero expirada: cerrar contexto y reintentar login limpio.
-      await context.close()
+      const reusedViaProxy = await tryReuseStoredSession(browser, 'login_proxy')
+      if (reusedViaProxy) return reusedViaProxy
     }
 
     if (!isAutoLoginEnabled()) {
@@ -94,9 +135,7 @@ export async function openAccountBrowserSessionWithLogin(
     }
 
     // Login debe salir por proxy sticky aunque harvest/inbound vayan en directo.
-    const jobUsesProxy = shouldUseAccountProxyForJob(job)
-    const loginUsesProxy = shouldUseAccountProxyForJob('login')
-    if (loginUsesProxy && !jobUsesProxy) {
+    if (loginUsesProxy && !browserUsesLoginProxy) {
       outboundLog('playwright.relaunch_for_login_proxy', {
         accountId: account.id,
         accountLabel: account.label,
@@ -104,6 +143,7 @@ export async function openAccountBrowserSessionWithLogin(
       })
       await browser.close()
       browser = await launchBrowserForAccount(account, { headless, job: 'login' })
+      browserUsesLoginProxy = true
     }
 
     const { context, page, sessionPath } = await loginAccountAndSaveSession(

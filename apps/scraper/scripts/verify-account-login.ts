@@ -2,7 +2,13 @@ import dotenv from 'dotenv'
 import path from 'path'
 import fs from 'fs'
 import { db } from '@repo/db'
-import { launchBrowserForAccount } from '../src/scraping/playwright-context'
+import {
+  accountHasStoredSession,
+  accountSessionPath,
+  createContextForAccount,
+  launchBrowserForAccount,
+  persistAccountSessionState,
+} from '../src/scraping/playwright-context'
 import {
   buildAccountAuthConfig,
   loginAccountAndSaveSession,
@@ -91,6 +97,36 @@ async function main() {
   })
 
   try {
+    // 0) Reusar la sesión persistida (Neon/disco) si sigue viva: cada login
+    //    quema un OTP y es una señal visible para Airbnb.
+    if (accountHasStoredSession(account)) {
+      authLogger.step('verify-account', 'Sesión almacenada encontrada — validando sin re-login')
+      const context = await createContextForAccount(browser, account)
+      const page = await context.newPage()
+      await page.goto(process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co', {
+        waitUntil: 'domcontentloaded',
+      })
+      await dismissBlockingOverlays(page)
+      await waitForSecurityChallengeIfPresent(page)
+
+      if (await isSessionValid(page)) {
+        const sessionPath = account.sessionPath ?? accountSessionPath(account.id)
+        fs.mkdirSync(path.dirname(sessionPath), { recursive: true })
+        await context.storageState({ path: sessionPath })
+        await persistAccountSessionState(account.id, context)
+        await markAccountSessionActive(account.id, sessionPath)
+        authLogger.info('verify-account', 'Sesión reutilizada y refrescada — cuenta ACTIVE', {
+          accountId: account.id,
+          sessionPath,
+        })
+        await context.close()
+        return
+      }
+
+      authLogger.warn('verify-account', 'Sesión almacenada expirada — haciendo login completo')
+      await context.close()
+    }
+
     try {
       const { context, page, sessionPath } = await loginAccountAndSaveSession(browser, account)
 
