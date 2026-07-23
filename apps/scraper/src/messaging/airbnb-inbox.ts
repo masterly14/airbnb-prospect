@@ -341,6 +341,10 @@ export async function scrapeThreadMessages(
     // Incluye selectores amplios: las burbujas cortas ("Si", "Hola") a menudo
     // no traen data-testid exacto, y el card de reserva sí — sin esto el bot
     // solo ve "Invitación para reservar" y no el "Si"/"Hola" real del host.
+    //
+    // IMPORTANTE: no declarar funciones anidadas aquí. tsx/esbuild inyecta
+    // `__name(...)` al transpilar y Playwright serializa el callback al browser,
+    // donde `__name` no existe → ReferenceError.
     const rawTexts = await page.evaluate((limit) => {
       const selectors = [
         '[data-testid="message"]',
@@ -351,19 +355,17 @@ export async function scrapeThreadMessages(
         '[data-testid*="chat-message"]',
         '[data-testid*="Message"]',
       ]
-      const seen = new Set<string>()
+      const seen: Record<string, true> = {}
       const out: string[] = []
-      const pushText = (raw: string) => {
-        const text = raw.trim().replace(/\s+/g, ' ')
-        if (!text || text.length < 1 || seen.has(text)) return
-        // Evitar nodos gigantes (columna entera / card de reserva)
-        if (text.length > 500) return
-        seen.add(text)
-        out.push(text)
-      }
-      for (const sel of selectors) {
-        for (const el of document.querySelectorAll(sel)) {
-          pushText(el.textContent ?? '')
+
+      for (let s = 0; s < selectors.length; s++) {
+        const nodes = document.querySelectorAll(selectors[s]!)
+        for (let i = 0; i < nodes.length; i++) {
+          const text = (nodes[i]!.textContent ?? '').trim().replace(/\s+/g, ' ')
+          if (!text || text.length < 1 || seen[text]) continue
+          if (text.length > 500) continue
+          seen[text] = true
+          out.push(text)
           if (out.length >= limit) return out
         }
       }
@@ -374,11 +376,15 @@ export async function scrapeThreadMessages(
         document.querySelector('[data-testid*="messages"]') ||
         document.querySelector('main')
       if (threadRoot && out.length < 3) {
-        for (const el of threadRoot.querySelectorAll('p, span, div')) {
+        const nodes = threadRoot.querySelectorAll('p, span, div')
+        for (let i = 0; i < nodes.length; i++) {
+          const el = nodes[i]!
           const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
           if (!text || text.length > 180) continue
           if (el.childElementCount > 3) continue
-          pushText(text)
+          if (seen[text]) continue
+          seen[text] = true
+          out.push(text)
           if (out.length >= limit) break
         }
       }
