@@ -220,7 +220,7 @@ export async function collectInboxThreads(
   return threads
 }
 
-const SELF_MARKERS = /^(tú|tu|you|me|yo)\b/i
+const SELF_MARKERS = /^(t[uú]|tu|you|me|yo)\b/i
 
 export function classifyMessageDirection(
   text: string,
@@ -242,7 +242,8 @@ export function classifyMessageDirection(
     return 'INBOUND'
   }
 
-  if (/^(tú|you):/i.test(normalized)) {
+  // "Tú: …" / "You: …" = mensaje propio (a veces con acento raro en el DOM)
+  if (/^t[uú]\s*:/i.test(normalized) || /^you\s*:/i.test(normalized)) {
     return 'OUTBOUND'
   }
 
@@ -337,22 +338,48 @@ export async function scrapeThreadMessages(
     await page.waitForTimeout(600)
 
     // Extracción en un solo evaluate (evitar N×innerText sobre nodos amplios).
+    // Incluye selectores amplios: las burbujas cortas ("Si", "Hola") a menudo
+    // no traen data-testid exacto, y el card de reserva sí — sin esto el bot
+    // solo ve "Invitación para reservar" y clasifica AMBIGUO.
     const rawTexts = await page.evaluate((limit) => {
       const selectors = [
         '[data-testid="message"]',
         '[data-testid="thread-message"]',
         '[data-testid="msg-content"]',
         '[data-testid="message-content"]',
+        '[data-testid*="message-bubble"]',
+        '[data-testid*="chat-message"]',
+        '[data-testid*="Message"]',
       ]
       const seen = new Set<string>()
       const out: string[] = []
+      const pushText = (raw: string) => {
+        const text = raw.trim().replace(/\s+/g, ' ')
+        if (!text || text.length < 1 || seen.has(text)) return
+        // Evitar nodos gigantes (columna entera / card de reserva)
+        if (text.length > 500) return
+        seen.add(text)
+        out.push(text)
+      }
       for (const sel of selectors) {
         for (const el of document.querySelectorAll(sel)) {
-          const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
-          if (!text || text.length < 1 || seen.has(text)) continue
-          seen.add(text)
-          out.push(text)
+          pushText(el.textContent ?? '')
           if (out.length >= limit) return out
+        }
+      }
+
+      // Fallback: párrafos / spans cortos dentro del panel de hilo
+      const threadRoot =
+        document.querySelector('[data-testid*="thread"]') ||
+        document.querySelector('[data-testid*="messages"]') ||
+        document.querySelector('main')
+      if (threadRoot && out.length < 3) {
+        for (const el of threadRoot.querySelectorAll('p, span, div')) {
+          const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
+          if (!text || text.length > 180) continue
+          if (el.childElementCount > 3) continue
+          pushText(text)
+          if (out.length >= limit) break
         }
       }
       return out
@@ -365,6 +392,14 @@ export async function scrapeThreadMessages(
 
     let meaningful = filterMeaningfulThreadMessages(domMessages)
 
+    // Preferir API GraphQL si el DOM solo trajo UI / aún no hay inbound real
+    if (!lastMeaningfulInbound(meaningful) && fromApi.length > 0) {
+      const fromApiMeaningful = filterMeaningfulThreadMessages(fromApi)
+      if (lastMeaningfulInbound(fromApiMeaningful)) {
+        meaningful = fromApiMeaningful
+      }
+    }
+
     if (!lastMeaningfulInbound(meaningful)) {
       const threadId = parseThreadIdFromUrl(lead.threadId)
       if (threadId) {
@@ -374,14 +409,14 @@ export async function scrapeThreadMessages(
           .innerText()
           .catch(() => '')
         const fromPreview = extractHostReplyFromInboxPreview(preview, lead.name)
-        if (fromPreview) {
+        if (fromPreview && !isAirbnbThreadNoise(fromPreview)) {
           domMessages.push({ direction: 'INBOUND', content: fromPreview })
           meaningful = filterMeaningfulThreadMessages(domMessages)
         }
       }
     }
 
-    if (meaningful.length > 0) {
+    if (lastMeaningfulInbound(meaningful)) {
       return meaningful.slice(-maxMessages)
     }
 
@@ -389,7 +424,7 @@ export async function scrapeThreadMessages(
       return filterMeaningfulThreadMessages(fromApi).slice(-maxMessages)
     }
 
-    return []
+    return meaningful.slice(-maxMessages)
   } finally {
     page.off('response', onResponse)
   }

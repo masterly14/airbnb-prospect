@@ -7,6 +7,7 @@ const AIRBNB_NOISE_PATTERNS: RegExp[] = [
   /^reservar$/i,
   /^solicita\s+(reservar|una\s+reservaci[oó]n)/i,
   /^reserva\s+ahora/i,
+  /^reserva\s+ahora\s+mismo/i,
   /^tiempo de respuesta/i,
   /^le[ií]do por\b/i,
   /^no le[ií]do$/i,
@@ -17,6 +18,18 @@ const AIRBNB_NOISE_PATTERNS: RegExp[] = [
   /^[\d\s–-]+·\s*/i,
   /\bhu[eé]sped el \d/i,
   /^[\w\s,]+ y \d+ m[aá]s\.?$/i,
+
+  // Invitación / estado de reserva (muy común tras cold outreach)
+  /^invitaci[oó]n para reservar\b/i,
+  /\bte invitamos a hacer una reservaci[oó]n\b/i,
+  /\bel estado de la reservaci[oó]n\b/i,
+  /^reserva una oferta especial\b/i,
+  /\breservaci[oó]n pendiente\b/i,
+  /\breservaci[oó]n del \d/i,
+  /^t[uú]\s*:\s*consulta enviada\b/i,
+  /\bconsulta enviada\b.*\breservaci[oó]n\b/i,
+  /\binvitaci[oó]n para reservar\b.*\breservaci[oó]n\b/i,
+  /^reservaci[oó]n$/i,
 ]
 
 function isNameListOnly(text: string): boolean {

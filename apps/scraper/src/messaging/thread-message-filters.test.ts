@@ -15,6 +15,23 @@ describe('isAirbnbThreadNoise', () => {
     assert.equal(isAirbnbThreadNoise('Reservar'), true)
   })
 
+  it('flags reservation invitation / status UI', () => {
+    assert.equal(
+      isAirbnbThreadNoise(
+        'Invitación para reservar. El estado de la reservación es Te invitamos a hacer una reservación. Reservación del 24 jul al 25 jul en Bogotá.',
+      ),
+      true,
+    )
+    assert.equal(
+      isAirbnbThreadNoise(
+        'Tú: Consulta enviada. El estado de la reservación es Consulta enviada. Reservación del 24 jul al 25 jul en Bogotá.',
+      ),
+      true,
+    )
+    assert.equal(isAirbnbThreadNoise('Te invitamos a hacer una reservación · 25 – 27 de jul · Bogotá'), true)
+    assert.equal(isAirbnbThreadNoise('Reserva una oferta especial'), true)
+  })
+
   it('flags name-only UI snippets', () => {
     assert.equal(isAirbnbThreadNoise('Elizabeth, Catalina'), true)
     assert.equal(isAirbnbThreadNoise('Miguel Angel, Maria Fernanda, Julio Cesar'), true)
@@ -24,6 +41,8 @@ describe('isAirbnbThreadNoise', () => {
     assert.equal(isAirbnbThreadNoise('Dale, cuéntame más'), false)
     assert.equal(isAirbnbThreadNoise('Gracias, no requerimos en el momento.'), false)
     assert.equal(isAirbnbThreadNoise('¿Cómo funciona con las limpiezas?'), false)
+    assert.equal(isAirbnbThreadNoise('Si'), false)
+    assert.equal(isAirbnbThreadNoise('Hola Michell'), false)
   })
 })
 
@@ -48,6 +67,20 @@ describe('lastMeaningfulInbound', () => {
     ]
     const last = lastMeaningfulInbound(messages)
     assert.equal(last?.content, 'Dale, cuéntame más')
+  })
+
+  it('skips reservation invite and keeps short affirmative', () => {
+    const messages = [
+      { direction: 'OUTBOUND', content: '¡Hola Luis! Noté que eres superanfitrión...', aiIntent: 'PHASE_1_COLD' },
+      { direction: 'INBOUND', content: 'Hola Michell' },
+      { direction: 'INBOUND', content: 'Si' },
+      {
+        direction: 'INBOUND',
+        content:
+          'Invitación para reservar. El estado de la reservación es Te invitamos a hacer una reservación. Reservación del 24 jul al 25 jul en Bogotá.',
+      },
+    ]
+    assert.equal(lastMeaningfulInbound(messages)?.content, 'Si')
   })
 
   it('ignores simulated dry-run inbounds', () => {
