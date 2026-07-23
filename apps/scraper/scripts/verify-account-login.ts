@@ -103,9 +103,24 @@ async function main() {
       authLogger.step('verify-account', 'Sesión almacenada encontrada — validando sin re-login')
       const context = await createContextForAccount(browser, account)
       const page = await context.newPage()
-      await page.goto(process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co', {
-        waitUntil: 'domcontentloaded',
-      })
+      try {
+        await page.goto(process.env.AIRBNB_BASE_URL ?? 'https://www.airbnb.com.co', {
+          waitUntil: 'domcontentloaded',
+        })
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        if (/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|proxy/i.test(msg)) {
+          await context.close()
+          throw new Error(
+            `Proxy Decodo inaccesible (${account.proxyHost}:${account.proxyPort}). ` +
+              `La sesión en Neon existe, pero no se puede validar hasta que el túnel responda. ` +
+              `Revisa Decodo (plan activo, credenciales, puerto sticky) o prueba: ` +
+              `$env:LOGIN_USE_ACCOUNT_PROXY="false"; npm run auth:verify-account -- --email ${account.airbnbEmail} --headed`,
+            { cause: error },
+          )
+        }
+        throw error
+      }
       await dismissBlockingOverlays(page)
       await waitForSecurityChallengeIfPresent(page)
 
