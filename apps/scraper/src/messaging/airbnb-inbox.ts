@@ -340,7 +340,7 @@ export async function scrapeThreadMessages(
     // Extracción en un solo evaluate (evitar N×innerText sobre nodos amplios).
     // Incluye selectores amplios: las burbujas cortas ("Si", "Hola") a menudo
     // no traen data-testid exacto, y el card de reserva sí — sin esto el bot
-    // solo ve "Invitación para reservar" y clasifica AMBIGUO.
+    // solo ve "Invitación para reservar" y no el "Si"/"Hola" real del host.
     const rawTexts = await page.evaluate((limit) => {
       const selectors = [
         '[data-testid="message"]',

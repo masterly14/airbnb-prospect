@@ -119,7 +119,7 @@ async function main() {
   }
 
   if (classification.intent !== 'interested') {
-    console.log('\n→ AMBIGUO: no se responde automáticamente.')
+    console.log('\n→ Sin texto de host usable: no se responde automáticamente.')
     await db.$disconnect()
     return
   }
@@ -131,6 +131,7 @@ async function main() {
   }
 
   console.log('\n========== MENSAJE 2 (lo que se enviaría) ==========')
+  console.log(`(pattern: ${classification.matchedPattern})`)
   console.log(buildCuriosityReplyMessage(lead))
 
   console.log('\n(Dry-run: no se envió por Airbnb.)')

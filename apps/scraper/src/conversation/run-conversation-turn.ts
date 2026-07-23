@@ -57,9 +57,9 @@ function alreadySentCuriosityReply(
  *
  * Reglas (sin LLM):
  * 1. Rechazo por regex → CLOSED_LOST, no se responde.
- * 2. Interés por regex → mensaje 2 estático (solo si aún no se envió).
- * 3. Ambiguo → no se responde.
- * 4. Tras mensaje 2, si acepta reunión → HUMAN_TAKEOVER (admin gestiona).
+ * 2. Cualquier otra respuesta real del host (incl. seca: "Si", "Hola", "Ok")
+ *    → mensaje 2 estático (solo si aún no se envió).
+ * 3. Tras mensaje 2, si acepta reunión → HUMAN_TAKEOVER (admin gestiona).
  */
 export async function runConversationTurn(
   page: Page,
@@ -142,10 +142,11 @@ export async function runConversationTurn(
       return { leadId, outcome: 'skipped_already_replied', intent: aiTag }
     }
 
+    // interested (explícito o dry_default_listen). ambiguous solo si texto vacío.
     if (classification.intent !== 'interested') {
       conversationLog('conversation.turn.skip', {
         leadId,
-        reason: 'ambiguous_no_auto_reply',
+        reason: 'empty_or_unclassified',
       })
       return { leadId, outcome: 'skipped_ambiguous', intent: aiTag }
     }
@@ -165,7 +166,11 @@ export async function runConversationTurn(
 
     await recordBotReply(leadId, replyText, 'CURIOSITY_REPLY')
     conversationLog('conversation.send.success', { leadId, template: 'CURIOSITY_REPLY' })
-    conversationLog('conversation.turn.complete', { leadId, outcome: 'replied' })
+    conversationLog('conversation.turn.complete', {
+      leadId,
+      outcome: 'replied',
+      pattern: classification.matchedPattern,
+    })
 
     return { leadId, outcome: 'replied', intent: aiTag }
   } catch (error) {

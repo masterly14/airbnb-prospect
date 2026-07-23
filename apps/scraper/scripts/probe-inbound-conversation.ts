@@ -89,13 +89,13 @@ async function printLeadAnalysis(lead: Lead): Promise<void> {
   console.log('\n=== Acción esperada ===')
   if (classification.intent === 'rejected') {
     console.log('→ CLOSED_LOST (no envía mensaje)')
-  } else if (classification.intent === 'ambiguous') {
-    console.log('→ AMBIGUO (no envía mensaje automático)')
   } else if (curiositySent) {
     console.log('→ Mensaje 2 ya enviado; evaluar reunión o esperar humano')
-  } else {
-    console.log('→ Enviaría mensaje 2 (CURIOSITY_REPLY):')
+  } else if (classification.intent === 'interested') {
+    console.log(`→ Enviaría mensaje 2 (CURIOSITY_REPLY) [${classification.matchedPattern}]:`)
     console.log('\n' + buildCuriosityReplyMessage(lead))
+  } else {
+    console.log('→ Sin texto usable (no envía)')
   }
 }
 

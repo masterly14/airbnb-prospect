@@ -1,6 +1,10 @@
 /**
  * Clasificación determinística de respuestas del host (sin LLM).
- * Prioridad: rechazo → interés → ambiguo.
+ * Prioridad: rechazo → interés explícito → interés por defecto (respuesta seca).
+ *
+ * En prospección Airbnb los hosts suelen responder seco ("Si", "Hola", "Ok",
+ * "Recibido"). Eso NO es ambigüedad operativa: es luz verde para el mensaje 2.
+ * Solo el rechazo explícito corta el auto-reply.
  */
 
 export type HostReplyIntent = 'interested' | 'rejected' | 'ambiguous'
@@ -75,6 +79,13 @@ const REJECTION_PATTERNS: Array<{ label: string; re: RegExp }> = [
 
 /** Respuestas que abren la puerta a enviar el mensaje 2 (curiosidad). */
 const INTEREST_PATTERNS: Array<{ label: string; re: RegExp }> = [
+  // Afirmación corta / seca (muy común en hosts)
+  { label: 'si_solo', re: /^(s[ií]|sip|sep|sim)(?:\s*[.!?,…👍✅]*)?$/i },
+  { label: 'ok_solo', re: /^(ok|okay|vale|va|listo|bien)(?:\s*[.!?,…]*)?$/i },
+  { label: 'saludo', re: /^(hola|buenas?|buen\s+(d[ií]a|tarde|noches)|hey|hi)\b/i },
+  { label: 'saludo_nombre', re: /^hola[\s,]+[\p{L}'-]{2,}/iu },
+  { label: 'ack_seco', re: /^(recibido|entendido|de\s+acuerdo|okey|oka)(?:\s*[.!?,…]*)?$/i },
+
   // Afirmación / luz verde coloquial (CO)
   { label: 'dale', re: /\bdale\b/i },
   { label: 'adelante', re: /\badelante\b/i },
@@ -136,6 +147,14 @@ function matchFirst(text: string, patterns: Array<{ label: string; re: RegExp }>
   return null
 }
 
+/**
+ * True si la respuesta del host debe disparar el mensaje 2 (curiosidad).
+ * Rechazo = no. Cualquier otro texto real del host = sí.
+ */
+export function shouldSendCuriosityReply(intent: HostReplyIntent): boolean {
+  return intent === 'interested'
+}
+
 export function classifyHostReply(text: string): HostReplyClassification {
   const normalized = text.trim().replace(/\s+/g, ' ')
   if (!normalized) {
@@ -152,7 +171,8 @@ export function classifyHostReply(text: string): HostReplyClassification {
     return { intent: 'interested', matchedPattern: interest }
   }
 
-  return { intent: 'ambiguous' }
+  // Default de industria: respuesta seca / no-rechazo = quiere escuchar.
+  return { intent: 'interested', matchedPattern: 'dry_default_listen' }
 }
 
 export function isMeetingAffirmative(text: string): boolean {

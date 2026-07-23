@@ -47,6 +47,18 @@ describe('classifyHostReply — interés', () => {
     'Hola buenas tardes, claro que sí, cuéntame',
     'Bacano, explícame',
     'Charlemos, suena chevere',
+    // Secas de industria (= quiere escuchar)
+    'Si',
+    'Sí',
+    'OK',
+    'Ok',
+    'Hola',
+    'Hola Michell',
+    'Buenas',
+    'Recibido',
+    'Entendido',
+    'Bien',
+    'No sé',
   ]
 
   for (const text of interests) {
@@ -54,17 +66,25 @@ describe('classifyHostReply — interés', () => {
       assert.equal(classifyHostReply(text).intent, 'interested', text)
     })
   }
+
+  it('tags bare Si as si_solo', () => {
+    assert.equal(classifyHostReply('Si').matchedPattern, 'si_solo')
+  })
+
+  it('tags unknown dry reply as dry_default_listen', () => {
+    assert.equal(classifyHostReply('Mmm ya veo').intent, 'interested')
+    assert.equal(classifyHostReply('Mmm ya veo').matchedPattern, 'dry_default_listen')
+  })
 })
 
-describe('classifyHostReply — prioridad y ambiguo', () => {
+describe('classifyHostReply — prioridad y vacío', () => {
   it('rejection wins over interest when both could match', () => {
     assert.equal(classifyHostReply('No gracias, pero suena interesante').intent, 'rejected')
   })
 
-  it('returns ambiguous for neutral text', () => {
-    assert.equal(classifyHostReply('Recibido').intent, 'ambiguous')
-    assert.equal(classifyHostReply('Entendido').intent, 'ambiguous')
+  it('empty text stays ambiguous (no auto-reply)', () => {
     assert.equal(classifyHostReply('').intent, 'ambiguous')
+    assert.equal(classifyHostReply('   ').intent, 'ambiguous')
   })
 
   it('ok gracias is treated as soft rejection', () => {
@@ -74,10 +94,6 @@ describe('classifyHostReply — prioridad y ambiguo', () => {
   it('bare No is rejection, not interest', () => {
     assert.equal(classifyHostReply('No').intent, 'rejected')
     assert.equal(classifyHostReply('No').matchedPattern, 'no_solo')
-  })
-
-  it('does not treat No sé as bare rejection', () => {
-    assert.equal(classifyHostReply('No sé').intent, 'ambiguous')
   })
 })
 
