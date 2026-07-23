@@ -45,7 +45,11 @@ import { dismissBlockingOverlays } from '../src/scraping/airbnb-scraper'
 import { detectPageBlockers } from '../src/scraping/blockers'
 import { isSessionValid } from '../src/scraping/session-utils'
 import { sleep } from '../src/resilience/retry'
-import { AccountSessionMissingError, AccountProxyConfigError } from '../src/scraping/playwright-context'
+import {
+  AccountSessionMissingError,
+  AccountProxyConfigError,
+  resolveHeadless,
+} from '../src/scraping/playwright-context'
 import { AccountLoginPrerequisitesError } from '../src/accounts/account-login'
 import { openAccountBrowserSessionWithLogin } from '../src/accounts/account-browser-session'
 import { pickNextAccount } from '../src/accounts/account-selector'
@@ -135,6 +139,7 @@ export async function runHarvest(
     throw new HarvestAuthMissingError()
   }
 
+  const headless = resolveHeadless(process.env.HARVEST_HEADED !== 'true')
   await acquireMutexWithRetry()
   harvestLog('harvest.start', {
     ...mvpModeLogContext(),
@@ -144,7 +149,8 @@ export async function runHarvest(
     sendMax: getHarvestSendMax(),
     maxListings: process.env.HARVEST_MAX_LISTINGS ?? '20',
     maxPages: process.env.HARVEST_MAX_PAGES ?? process.env.HARVEST_MAX_PAGE ?? '1',
-    headed: process.env.HARVEST_HEADED === 'true',
+    headedRequested: process.env.HARVEST_HEADED === 'true',
+    headless,
     icpMinProperties: process.env.ICP_MIN_PROPERTIES ?? '10',
     icpMaxProperties: process.env.ICP_MAX_PROPERTIES ?? '25',
   })
@@ -186,7 +192,12 @@ export async function runHarvest(
     })
   } catch (error) {
     report.errors++
-    harvestLog('harvest.error', { ...mvpModeLogContext(), error: String(error) })
+    harvestLog('harvest.error', {
+      ...mvpModeLogContext(),
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack?.split('\n').slice(0, 8) : null,
+      name: error instanceof Error ? error.name : typeof error,
+    })
     throw error
   } finally {
     await releasePlaywrightMutex()
@@ -215,7 +226,7 @@ async function harvestWithAccountRotation(
   mvpMode: boolean,
 ): Promise<void> {
   const excluded = new Set<string>()
-  const headless = process.env.HARVEST_HEADED !== 'true'
+  const headless = resolveHeadless(process.env.HARVEST_HEADED !== 'true')
 
   while (true) {
     const account = await pickNextAccount({ excludeAccountIds: [...excluded] })
@@ -335,7 +346,7 @@ async function harvestWithAccountRotation(
 /** Modo legado sin cuentas de prospección: usa el archivo de sesión único. */
 async function harvestWithLegacySession(report: HarvestReport): Promise<void> {
   const browser = await chromium.launch({
-    headless: process.env.HARVEST_HEADED !== 'true',
+    headless: resolveHeadless(process.env.HARVEST_HEADED !== 'true'),
     ...getChromeChannelOption(),
   })
 

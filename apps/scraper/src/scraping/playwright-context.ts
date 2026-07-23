@@ -237,6 +237,33 @@ export type LaunchAccountBrowserOptions = {
 }
 
 /**
+ * En Docker/Railway no hay DISPLAY: Chromium headed aborta con
+ * `browserType.launch: Target page, context or browser…`. Forzamos headless
+ * salvo que exista un display o se pida explícitamente HEADLESS=false en local.
+ */
+export function resolveHeadless(requestedHeadless = true): boolean {
+  if (requestedHeadless) return true
+
+  const hasDisplay = Boolean(process.env.DISPLAY?.trim())
+  const inCiOrDocker =
+    process.env.CI === 'true' ||
+    process.env.RAILWAY_ENVIRONMENT !== undefined ||
+    fs.existsSync('/.dockerenv')
+
+  if (inCiOrDocker && !hasDisplay) {
+    outboundLog('playwright.force_headless', {
+      reason: 'no_display_in_container',
+      requestedHeadless,
+      CI: process.env.CI ?? null,
+      RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT ?? null,
+    })
+    return true
+  }
+
+  return false
+}
+
+/**
  * Un browser por cuenta, con el proxy a nivel de launch cuando el job lo pide.
  *
  * Chromium ignora `proxy` por-contexto salvo que el browser se haya lanzado
@@ -250,22 +277,37 @@ export async function launchBrowserForAccount(
   const job = options.job ?? 'outbound'
   const useProxy = options.useProxy ?? shouldUseAccountProxyForJob(job)
   const proxy = buildProxyOption(account, { useProxy })
+  const headless = resolveHeadless(options.headless ?? true)
 
   outboundLog('playwright.browser_launch', {
     accountId: account.id,
     accountLabel: account.label,
     job,
+    headless,
     networkMode: useProxy ? 'account_proxy' : 'direct',
     blockHeavyAssets: shouldBlockHeavyAssets(),
     proxyHost: useProxy ? (account.proxyHost ?? null) : null,
     proxyPort: useProxy ? (account.proxyPort ?? null) : null,
   })
 
-  return chromium.launch({
-    headless: options.headless ?? true,
-    ...getChromeChannelOption(),
-    ...(proxy ? { proxy } : {}),
-  })
+  try {
+    return await chromium.launch({
+      headless,
+      ...getChromeChannelOption(),
+      ...(proxy ? { proxy } : {}),
+    })
+  } catch (error) {
+    outboundLog('playwright.browser_launch_failed', {
+      accountId: account.id,
+      accountLabel: account.label,
+      job,
+      headless,
+      networkMode: useProxy ? 'account_proxy' : 'direct',
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack?.split('\n').slice(0, 6) : null,
+    })
+    throw error
+  }
 }
 
 export async function createContextForAccount(
