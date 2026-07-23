@@ -63,8 +63,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function parseInternalDate(value: unknown): number {
-  if (typeof value === "number") return value
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value)
+  if (typeof value === "number" || (typeof value === "string" && /^\d+$/.test(value))) {
+    const n = Number(value)
+    // Gmail sometimes returns seconds; Date.now() is ms.
+    return n > 0 && n < 1e12 ? n * 1000 : n
+  }
   if (typeof value === "string") {
     const parsed = Date.parse(value)
     if (!Number.isNaN(parsed)) return parsed
@@ -344,6 +347,9 @@ export function findOtpInMessages(messages: GmailMessage[], sinceMs: number): st
   return null
 }
 
+/** How far before the OTP request we still accept Gmail messages (clock skew / UI lag). */
+export const OTP_EMAIL_LOOKBACK_MS = 180_000
+
 export async function waitForAirbnbOtp(
   sinceMs: number,
   configOverride?: Partial<Pick<ComposioConfig, "userId" | "connectionId">>,
@@ -357,7 +363,30 @@ export async function waitForAirbnbOtp(
     const messages = await fetchLatestAirbnbEmails(config)
     const otp = findOtpInMessages(messages, sinceMs)
 
-    if (otp) return otp
+    if (otp) {
+      console.log(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "otp.found",
+          attempt,
+          messages: messages.length,
+        }),
+      )
+      return otp
+    }
+
+    const newest = messages[0]
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "otp.poll",
+        attempt,
+        messages: messages.length,
+        sinceMs,
+        newestInternalDate: newest ? parseInternalDate(newest.internalDate) : null,
+        newestSubject: newest?.subject ?? null,
+      }),
+    )
 
     await new Promise((resolve) => setTimeout(resolve, config.pollMs))
   }

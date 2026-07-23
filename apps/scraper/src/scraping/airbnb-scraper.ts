@@ -96,9 +96,58 @@ async function dismissTranslationDialog(page: Page): Promise<boolean> {
   return true
 }
 
+async function dismissCookieConsentDialog(page: Page): Promise<boolean> {
+  const cookieUi = page
+    .getByRole('dialog')
+    .filter({
+      hasText:
+        /ayúdanos a mejorar|improve your experience|administra tus preferencias|manage your preferences|solo las necesarias|only necessary/i,
+    })
+    .or(
+      page
+        .locator('[data-testid="modal-container"], [role="dialog"], section, aside')
+        .filter({
+          hasText: /ayúdanos a mejorar|administra tus preferencias|aceptar todo/i,
+        }),
+    )
+    .first()
+
+  if (!(await cookieUi.isVisible({ timeout: 2_000 }).catch(() => false))) {
+    // Fallback: botones sueltos aunque el contenedor no sea dialog.
+    const acceptLoose = page
+      .getByRole('button', { name: /^aceptar todo$|^accept all$/i })
+      .or(page.getByRole('button', { name: /^solo las necesarias$|^only necessary/i }))
+      .first()
+    if (!(await acceptLoose.isVisible({ timeout: 1_000 }).catch(() => false))) {
+      return false
+    }
+    await acceptLoose.click({ timeout: 5_000 })
+    await page.waitForTimeout(400)
+    return true
+  }
+
+  const accept = cookieUi
+    .getByRole('button', { name: /^aceptar todo$|^accept all$/i })
+    .or(cookieUi.getByRole('button', { name: /^solo las necesarias$|^only necessary/i }))
+    .first()
+
+  if (!(await accept.isVisible({ timeout: 2_000 }).catch(() => false))) {
+    return false
+  }
+
+  await accept.click({ timeout: 5_000 })
+  await cookieUi.waitFor({ state: 'hidden', timeout: 8_000 }).catch(() => {})
+  await page.waitForTimeout(400)
+  return true
+}
+
 export async function dismissBlockingOverlays(page: Page) {
   for (let attempt = 0; attempt < 6; attempt++) {
     let dismissed = false
+
+    if (await dismissCookieConsentDialog(page)) {
+      dismissed = true
+    }
 
     if (await dismissPricingDialog(page)) {
       dismissed = true

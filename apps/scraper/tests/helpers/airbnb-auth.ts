@@ -7,7 +7,7 @@ import {
   waitForUiSettle,
 } from '../../src/scraping/page-timing';
 import { isTwoFactorModalVisible, passwordInput, submitTwoFactorCode, twoFactorHeading, passkeyLoginHeading, tryAnotherWayButton, emailCodeLoginOption, isOtpInputVisible } from './airbnb-2fa';
-import { waitForAirbnbOtp } from './composio-gmail';
+import { OTP_EMAIL_LOOKBACK_MS, waitForAirbnbOtp } from './composio-gmail';
 import { authLog, maskEmail } from './auth-logger';
 import { waitForSecurityChallengeIfPresent } from '../../src/scraping/security-challenge';
 import {
@@ -69,13 +69,30 @@ async function openLoginModal(page: Page) {
 
   authLog('Paso 2/7', 'Seleccionando "Iniciar sesión"');
   await guestLoginMenuItem(page).click({ timeout: 10_000 });
+  // Airbnb mantiene requests de analytics abiertas; esperar `networkidle` aquí
+  // puede demorar el login aun cuando el modal ya está disponible.
+  await page.waitForTimeout(750);
+  // Proxy lento / Arkose a veces aparece en lugar del modal de login.
+  await waitForSecurityChallengeIfPresent(page);
+  await dismissBlockingOverlays(page);
 
   const loginModal = page
     .getByRole('dialog')
     .or(page.locator('[data-testid="modal-container"]'));
-  await expect(loginModal.first()).toBeVisible({ timeout: 15_000 });
-  authLog('Paso 2/7', 'Modal de login visible');
 
+  try {
+    await expect(loginModal.first()).toBeVisible({ timeout: getActionTimeoutMs() });
+  } catch {
+    authLog('Paso 2/7', 'Modal no visible — reabriendo menú de login');
+    await dismissBlockingOverlays(page);
+    await headerProfileMenuButton(page).click({ timeout: 10_000 });
+    await guestLoginMenuItem(page).click({ timeout: 10_000 });
+    await page.waitForTimeout(750);
+    await waitForSecurityChallengeIfPresent(page);
+    await expect(loginModal.first()).toBeVisible({ timeout: getActionTimeoutMs() });
+  }
+
+  authLog('Paso 2/7', 'Modal de login visible');
   return loginModal.first();
 }
 
@@ -208,7 +225,12 @@ async function bypassPasskeyAndUseEmailCode(
   await waitForUiSettle(page);
 
   await isOtpInputVisible(page, getActionTimeoutMs());
-  await handleTwoFactor(page, otpRequestedAt - 5_000, composioUserId, composioConnectionId);
+  await handleTwoFactor(
+    page,
+    otpRequestedAt - OTP_EMAIL_LOOKBACK_MS,
+    composioUserId,
+    composioConnectionId,
+  );
   return true;
 }
 
@@ -287,7 +309,7 @@ async function submitPasswordIfPrompted(
   if (await isTwoFactorModalVisible(page, 4_000)) {
     await handleTwoFactor(
       page,
-      Date.now() - 5_000,
+      Date.now() - OTP_EMAIL_LOOKBACK_MS,
       composioUserId,
       composioConnectionId,
     );
@@ -365,7 +387,12 @@ export async function loginAirbnb(
   if (!loggedInViaEmailCode) {
     const postEmailStep = await detectPostEmailStep(page);
     if (postEmailStep === '2fa') {
-      await handleTwoFactor(page, otpRequestedAt - 5_000, composioUserId, composioConnectionId);
+      await handleTwoFactor(
+    page,
+    otpRequestedAt - OTP_EMAIL_LOOKBACK_MS,
+    composioUserId,
+    composioConnectionId,
+  );
       await submitPasswordIfPrompted(page, password, composioUserId, composioConnectionId);
     } else {
       await submitPasswordStep(page, password, composioUserId, composioConnectionId);

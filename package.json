@@ -44,7 +44,7 @@
     "auth:verify-account": "npm run auth:verify-account -w @repo/scraper --",
     "proxy:assign-decodo": "npm run proxy:assign-decodo -w @repo/scraper --",
     "proxy:verify": "npm run proxy:verify -w @repo/scraper",
-    "auth:otp-test": "npm run auth:otp-test -w @repo/scraper",
+    "auth:otp-test": "npm run auth:otp-test -w @repo/scraper --",
     "gmail:list": "npm run gmail:list -w @repo/scraper --",
     "handoff:dry-run": "npm run handoff:dry-run -w @repo/scraper",
     "codegen": "npm run codegen -w @repo/scraper",

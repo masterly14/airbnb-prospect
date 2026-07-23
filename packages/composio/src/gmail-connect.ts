@@ -20,8 +20,11 @@ export async function createGmailConnectLink(options: {
   const composioUserId = toComposioUserId(options.accountId)
   const authConfigId = getGmailAuthConfigId()
 
+  // Reconectar Gmail deja conexiones previas en Composio; sin allowMultiple
+  // el SDK lanza ComposioMultipleConnectedAccountsError.
   const connectionRequest = await composio.connectedAccounts.link(composioUserId, authConfigId, {
     callbackUrl: options.callbackUrl,
+    allowMultiple: true,
   })
 
   if (!connectionRequest.redirectUrl) {
