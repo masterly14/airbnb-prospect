@@ -6,6 +6,9 @@ import {
   computeNextAvailabilityMs,
   pickNextAccount,
   reactivateExpiredCooldowns,
+  recoverReusableSessionAccounts,
+  softenFalseIdentityBlocks,
+  logAccountRotationPool,
 } from '../accounts/account-selector'
 import { mvpModeLogContext } from '../accounts/mvp-mode'
 import {
@@ -118,7 +121,10 @@ export async function runOrchestratorCycle(
   config: OrchestratorConfig,
 ): Promise<CycleResult> {
   await maybeResetDailyMessageCounts()
+  await softenFalseIdentityBlocks()
+  await recoverReusableSessionAccounts()
   await reactivateExpiredCooldowns()
+  await logAccountRotationPool()
 
   const did = { inbound: false, outbound: false, harvest: false }
 

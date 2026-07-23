@@ -1,7 +1,11 @@
 import dotenv from 'dotenv'
 import path from 'path'
 import { db } from '@repo/db'
-import { reactivateExpiredCooldowns } from '../src/accounts/account-selector'
+import {
+  reactivateExpiredCooldowns,
+  recoverReusableSessionAccounts,
+  softenFalseIdentityBlocks,
+} from '../src/accounts/account-selector'
 import { getMvpAccountId, isMvpSingleAccountMode, mvpModeLogContext } from '../src/accounts/mvp-mode'
 import { getTodayDateInColombia } from '../src/persistence/daily-outbound-stats'
 import {
@@ -15,6 +19,8 @@ export type AccountReaperReport = {
   mvpMode?: boolean
   mvpAccountId?: string
   reactivated: number
+  recovered?: number
+  softened?: number
   dailyResetApplied: boolean
   accountsReset: number
 }
@@ -51,6 +57,8 @@ export async function maybeResetDailyMessageCounts(now = new Date()): Promise<{
 }
 
 export async function runAccountReaper(): Promise<AccountReaperReport> {
+  const softened = await softenFalseIdentityBlocks()
+  const recovered = await recoverReusableSessionAccounts()
   const reactivated = await reactivateExpiredCooldowns()
   const dailyReset = await maybeResetDailyMessageCounts()
 
@@ -59,6 +67,8 @@ export async function runAccountReaper(): Promise<AccountReaperReport> {
     mvpMode: isMvpSingleAccountMode(),
     mvpAccountId: getMvpAccountId() ?? undefined,
     reactivated,
+    recovered: recovered.recovered.length,
+    softened: softened.softened.length,
     dailyResetApplied: dailyReset.applied,
     accountsReset: dailyReset.count,
   }

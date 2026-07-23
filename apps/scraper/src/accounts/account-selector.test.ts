@@ -4,6 +4,7 @@ import { AccountStatus, type ProspectAccount } from '@repo/db'
 import {
   accountCanEstablishSession,
   accountNextAvailableAt,
+  explainAccountPickSkip,
   getDailyMessageCap,
   isAccountEligibleForPick,
   nextColombiaMidnightUtc,
@@ -56,6 +57,35 @@ describe('account selector', () => {
         now,
       ),
       false,
+    )
+  })
+
+  it('explains skip reasons for rotation diagnostics', () => {
+    assert.equal(
+      explainAccountPickSkip(
+        makeAccount({ id: '1', label: 'A', airbnbEmail: 'a@test.com', status: AccountStatus.BLOCKED }),
+        now,
+      ),
+      'blocked',
+    )
+    assert.equal(
+      explainAccountPickSkip(
+        makeAccount({
+          id: '2',
+          label: 'B',
+          airbnbEmail: 'b@test.com',
+          status: AccountStatus.PENDING_CREDENTIALS,
+        }),
+        now,
+      ),
+      'pending_credentials',
+    )
+    assert.equal(
+      explainAccountPickSkip(
+        makeAccount({ id: '3', label: 'C', airbnbEmail: 'c@test.com', status: AccountStatus.ACTIVE }),
+        now,
+      ),
+      null,
     )
   })
 

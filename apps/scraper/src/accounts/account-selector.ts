@@ -2,6 +2,7 @@ import { AccountStatus, type ProspectAccount, db } from '@repo/db'
 import { OPERATIONS } from '../discovery/icp'
 import { addHours } from './account-repository'
 import { getMvpAccountId, isMvpSingleAccountMode, loadMvpAccount } from './mvp-mode'
+import { outboundLog } from '../logging/outbound-logger'
 
 /** Tope diario por cuenta: 2 oleadas × 10 msgs (objetivo operativo §2.3). */
 export function getDailyMessageCap(): number {
@@ -47,33 +48,35 @@ function sessionOrCredentialsWhere() {
   }
 }
 
-export function isAccountEligibleForPick(
+export function explainAccountPickSkip(
   account: ProspectAccount,
   now = new Date(),
-): boolean {
-  if (account.status === AccountStatus.BLOCKED) return false
-  if (
-    account.status === AccountStatus.PENDING_CREDENTIALS ||
-    account.status === AccountStatus.PENDING_GMAIL ||
-    account.status === AccountStatus.VERIFYING
-  ) {
-    return false
-  }
-
-  if (!accountCanEstablishSession(account)) return false
-  if (!account.market) return false
-
-  if (account.messagesSentToday >= getDailyMessageCap()) return false
-
+): string | null {
+  if (account.status === AccountStatus.BLOCKED) return 'blocked'
+  if (account.status === AccountStatus.PENDING_CREDENTIALS) return 'pending_credentials'
+  if (account.status === AccountStatus.PENDING_GMAIL) return 'pending_gmail'
+  if (account.status === AccountStatus.VERIFYING) return 'verifying'
+  if (!accountCanEstablishSession(account)) return 'no_session_or_credentials'
+  if (!account.market) return 'no_market'
+  if (account.messagesSentToday >= getDailyMessageCap()) return 'daily_cap'
   if (
     account.status === AccountStatus.COOLDOWN &&
     account.cooldownUntil &&
     account.cooldownUntil > now
   ) {
-    return false
+    return 'cooldown_active'
   }
+  if (account.status !== AccountStatus.ACTIVE && account.status !== AccountStatus.COOLDOWN) {
+    return `status_${account.status}`
+  }
+  return null
+}
 
-  return account.status === AccountStatus.ACTIVE || account.status === AccountStatus.COOLDOWN
+export function isAccountEligibleForPick(
+  account: ProspectAccount,
+  now = new Date(),
+): boolean {
+  return explainAccountPickSkip(account, now) === null
 }
 
 export function sortAccountsForPick(accounts: ProspectAccount[]): ProspectAccount[] {
@@ -82,6 +85,121 @@ export function sortAccountsForPick(accounts: ProspectAccount[]): ProspectAccoun
       return a.waveMessagesSent - b.waveMessagesSent
     }
     return a.createdAt.getTime() - b.createdAt.getTime()
+  })
+}
+
+/**
+ * Vuelve a ACTIVE las cuentas que quedaron en PENDING_CREDENTIALS aunque ya
+ * tienen sesión reutilizable en Neon (p. ej. verify-account restauró cookies
+ * pero el status no se actualizó, o un falso login_failed).
+ */
+export async function recoverReusableSessionAccounts(): Promise<{
+  recovered: Array<{ id: string; label: string; from: AccountStatus }>
+}> {
+  if (isMvpSingleAccountMode()) {
+    return { recovered: [] }
+  }
+
+  const stuck = await db.prospectAccount.findMany({
+    where: {
+      status: AccountStatus.PENDING_CREDENTIALS,
+      OR: [{ sessionStateEnc: { not: null } }, { sessionPath: { not: null } }],
+      market: { not: null },
+    },
+  })
+
+  const recovered: Array<{ id: string; label: string; from: AccountStatus }> = []
+  for (const account of stuck) {
+    await db.prospectAccount.update({
+      where: { id: account.id },
+      data: {
+        status: AccountStatus.ACTIVE,
+        cooldownUntil: null,
+      },
+    })
+    recovered.push({
+      id: account.id,
+      label: account.label,
+      from: AccountStatus.PENDING_CREDENTIALS,
+    })
+  }
+
+  if (recovered.length > 0) {
+    outboundLog('account.rotation_recovered', {
+      count: recovered.length,
+      accounts: recovered,
+    })
+  }
+
+  return { recovered }
+}
+
+/**
+ * BLOCKED solo debería usarse para IDENTITY. Si una cuenta quedó BLOCKED por
+ * un fallo de browser/login, la bajamos a PENDING_CREDENTIALS para que un
+ * verify-account la pueda reactivar (no la metemos a rotación sola).
+ */
+export async function softenFalseIdentityBlocks(): Promise<{
+  softened: Array<{ id: string; label: string }>
+}> {
+  if (isMvpSingleAccountMode()) {
+    return { softened: [] }
+  }
+
+  const blocked = await db.prospectAccount.findMany({
+    where: { status: AccountStatus.BLOCKED },
+  })
+
+  const softened: Array<{ id: string; label: string }> = []
+  for (const account of blocked) {
+    const identityHit = await db.accountBlockEvent.findFirst({
+      where: { accountId: account.id, type: 'IDENTITY' },
+      select: { id: true },
+    })
+    if (identityHit) continue
+
+    await db.prospectAccount.update({
+      where: { id: account.id },
+      data: {
+        status: AccountStatus.PENDING_CREDENTIALS,
+        cooldownUntil: null,
+      },
+    })
+    softened.push({ id: account.id, label: account.label })
+  }
+
+  if (softened.length > 0) {
+    outboundLog('account.false_block_softened', {
+      count: softened.length,
+      accounts: softened,
+    })
+  }
+
+  return { softened }
+}
+
+export async function logAccountRotationPool(now = new Date()): Promise<void> {
+  const accounts = await db.prospectAccount.findMany({
+    orderBy: { createdAt: 'asc' },
+  })
+
+  outboundLog('account.rotation_pool', {
+    mvpMode: isMvpSingleAccountMode(),
+    accounts: accounts.map((account) => {
+      const skip = explainAccountPickSkip(account, now)
+      return {
+        id: account.id,
+        label: account.label,
+        status: account.status,
+        market: account.market,
+        messagesSentToday: account.messagesSentToday,
+        waveMessagesSent: account.waveMessagesSent,
+        cooldownUntil: account.cooldownUntil?.toISOString() ?? null,
+        hasSession: Boolean(account.sessionStateEnc || account.sessionPath),
+        eligible: skip === null,
+        skipReason: skip,
+      }
+    }),
   })
 }
 
@@ -114,7 +232,19 @@ export async function pickNextAccount(
     candidates.filter((account) => isAccountEligibleForPick(account, now)),
   )
 
-  return eligible[0] ?? null
+  const picked = eligible[0] ?? null
+  if (picked) {
+    outboundLog('account.picked', {
+      accountId: picked.id,
+      accountLabel: picked.label,
+      market: picked.market,
+      waveMessagesSent: picked.waveMessagesSent,
+      eligibleCount: eligible.length,
+      eligibleLabels: eligible.map((a) => a.label),
+    })
+  }
+
+  return picked
 }
 
 export async function startWave(accountId: string): Promise<ProspectAccount> {
