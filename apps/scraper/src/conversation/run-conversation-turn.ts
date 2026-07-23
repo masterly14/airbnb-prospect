@@ -1,5 +1,8 @@
 import type { Page } from 'playwright'
-import { lastHostReplyForTurn } from '../messaging/thread-message-filters'
+import {
+  lastHostReplyForTurn,
+  normalizeScrapedHostBubble,
+} from '../messaging/thread-message-filters'
 import { conversationLog } from '../logging/conversation-logger'
 import { sendThreadOutboundMessage } from '../messaging/airbnb-messaging'
 import { buildCuriosityReplyMessage } from '../messaging/outbound-templates'
@@ -88,9 +91,18 @@ export async function runConversationTurn(
 
     const scrapedReply = options.scrapedHostReply?.trim() || null
     const lastInbound = lastHostReplyForTurn(context.recentMessages)
-    const hostText = scrapedReply || lastInbound?.content?.trim() || ''
+    // Defensa: UI de reserva / blobs concatenados NUNCA disparan mensaje 2.
+    const hostText =
+      normalizeScrapedHostBubble(scrapedReply ?? '') ||
+      normalizeScrapedHostBubble(lastInbound?.content ?? '') ||
+      ''
     if (!hostText) {
-      conversationLog('conversation.turn.skip', { leadId, reason: 'no_inbound' })
+      conversationLog('conversation.turn.skip', {
+        leadId,
+        reason: 'no_real_host_reply',
+        scrapedPreview: scrapedReply?.slice(0, 120) ?? null,
+        crmPreview: lastInbound?.content?.slice(0, 120) ?? null,
+      })
       return { leadId, outcome: 'skipped_no_inbound' }
     }
 
@@ -98,7 +110,7 @@ export async function runConversationTurn(
       conversationLog('conversation.host_reply.source', {
         leadId,
         source: 'airbnb_scrape',
-        preview: scrapedReply.slice(0, 120),
+        preview: hostText.slice(0, 120),
       })
     }
 

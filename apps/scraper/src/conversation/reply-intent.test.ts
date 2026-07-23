@@ -115,4 +115,19 @@ describe('isMeetingAffirmative', () => {
   it('does not match plain interest', () => {
     assert.equal(isMeetingAffirmative('Dale, cuéntame más'), false)
   })
+
+  it('does not treat reservation UI timestamps as meeting acceptance', () => {
+    assert.equal(
+      isMeetingAffirmative(
+        'Consulta enviadaMedellín City Stay | Near Everything16 – 17 de jul de 2026 · 1 huésped',
+      ),
+      false,
+    )
+    assert.equal(
+      isMeetingAffirmative(
+        'Reservación pendienteBello Apartaestudio 24 – 25 de jul de 2026 Tienes hasta el 24 jul',
+      ),
+      false,
+    )
+  })
 })

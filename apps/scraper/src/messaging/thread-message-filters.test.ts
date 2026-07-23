@@ -6,6 +6,7 @@ import {
   isOutboundTemplateEcho,
   lastHostReplyForTurn,
   lastMeaningfulInbound,
+  normalizeScrapedHostBubble,
 } from '../messaging/thread-message-filters'
 
 describe('isAirbnbThreadNoise', () => {
@@ -32,6 +33,30 @@ describe('isAirbnbThreadNoise', () => {
     assert.equal(isAirbnbThreadNoise('Reserva una oferta especial'), true)
   })
 
+  it('flags concatenated reservation UI that previously triggered false curiosity', () => {
+    assert.equal(
+      isAirbnbThreadNoise(
+        'Consulta enviadaLoft Piso 1402 – Vista y Ubicación IdealLeído por Aleja y The Concept Group Host',
+      ),
+      true,
+    )
+    assert.equal(isAirbnbThreadNoise('Nueva solicitud de reservación'), true)
+    assert.equal(isAirbnbThreadNoise('Estadía en curso · 23 – 24 de jul · 404 William nikko'), true)
+    assert.equal(isAirbnbThreadNoise('Confirmada · 26 – 28 de jul · 201 Mauricio Nikko'), true)
+    assert.equal(
+      isAirbnbThreadNoise(
+        'Consulta enviadaDos ambientes moderno con balcón 50523 – 24 de jul de 2026 · 1 huéspedEl anfitrión dispone de 24 horas para responderte.',
+      ),
+      true,
+    )
+    assert.equal(
+      isAirbnbThreadNoise(
+        'The Concept Group Host · Anfitrión16:27Reservación pendienteLoft Piso 1402 – Vista y Ubicación Ideal23 – 24 de jul de 2026 · 1 huéspedTienes hasta el 24 jul, 2:27 p.m. GMT-7 para responder.Completa la reservación',
+      ),
+      true,
+    )
+  })
+
   it('flags name-only UI snippets', () => {
     assert.equal(isAirbnbThreadNoise('Elizabeth, Catalina'), true)
     assert.equal(isAirbnbThreadNoise('Miguel Angel, Maria Fernanda, Julio Cesar'), true)
@@ -43,6 +68,28 @@ describe('isAirbnbThreadNoise', () => {
     assert.equal(isAirbnbThreadNoise('¿Cómo funciona con las limpiezas?'), false)
     assert.equal(isAirbnbThreadNoise('Si'), false)
     assert.equal(isAirbnbThreadNoise('Hola Michell'), false)
+  })
+})
+
+describe('normalizeScrapedHostBubble', () => {
+  it('returns null for reservation UI', () => {
+    assert.equal(normalizeScrapedHostBubble('Confirmada · 26 – 28 de jul · 201 Mauricio Nikko'), null)
+    assert.equal(normalizeScrapedHostBubble('Nueva solicitud de reservación'), null)
+  })
+
+  it('extracts real speech from Anfitrión header bubbles', () => {
+    assert.equal(
+      normalizeScrapedHostBubble('Felipe · Anfitrión9:18Buenos días 😃 Leído por Gabriela'),
+      'Buenos días 😃',
+    )
+    assert.equal(
+      normalizeScrapedHostBubble('Eliana Maria · Coanfitrión16:28Buenas tardes'),
+      'Buenas tardes',
+    )
+    assert.equal(
+      normalizeScrapedHostBubble('Luis · Anfitrión8:23Hola Michell'),
+      'Hola Michell',
+    )
   })
 })
 

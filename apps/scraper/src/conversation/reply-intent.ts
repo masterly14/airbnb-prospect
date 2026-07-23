@@ -134,7 +134,7 @@ const MEETING_AFFIRMATIVE_PATTERNS: Array<{ label: string; re: RegExp }> = [
   { label: 'agendar', re: /\b(agend(a|emos|ar)|reuni[oó]n|llamada|videollamada|meet|zoom|teams|google\s+meet)\b/i },
   { label: 'me_parece_bien', re: /\bme\s+parece(\s+bien|\s+perfecto|\s+genial)\b/i },
   { label: 'disponible', re: /\b(estoy\s+)?disponible(\s+(ma[nñ]ana|hoy|en\s+la\s+tarde))?\b/i },
-  { label: 'horario', re: /\b(a\s+las\s+)?\d{1,2}(:\d{2})?\s*(am|pm|a\.?\s*m\.?)?\b/i },
+  { label: 'horario', re: /\b(a\s+las|sobre\s+las|tipo)\s+\d{1,2}(:\d{2})?\s*(am|pm|a\.?\s*m\.?|de\s+la\s+(ma[nñ]ana|tarde|noche))?\b/i },
   { label: 'confirmo', re: /\b(confirmo|confirmado|cuenta\s+conmigo|nos\s+vemos|hablamos\s+ma[nñ]ana)\b/i },
   { label: 'acepto', re: /\b(acepto|de\s+acuerdo|trato\s+hecho|hag[aá]moslo)\b/i },
   { label: 'calendario', re: /\b(calendario|calendar|slot|espacio\s+en\s+la\s+agenda)\b/i },
