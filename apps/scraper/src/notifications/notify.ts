@@ -14,6 +14,7 @@ export type AlertKind =
   | 'BLOCKED'
   | 'ACCOUNT_COOLDOWN'
   | 'SESSION_EXPIRED'
+  | 'MANUAL_SESSION_REQUIRED'
   | 'POLICY_BLOCK'
   | 'MUTEX_STUCK'
   | 'AGENT_ERROR'
@@ -157,4 +158,56 @@ export function notifyAgentError(
     title: `Error en ${scope}: ${message}`,
     details: context,
   })
+}
+
+/**
+ * Alerta de acción humana: captcha Arkose o sesión muerta.
+ * Siempre va a OPERATIONAL_ALERT_EMAIL / HANDOFF_EMAIL (default svaron066@gmail.com).
+ */
+export async function notifyManualSessionRequired(input: {
+  subject: string
+  text: string
+  accountId: string
+}): Promise<void> {
+  const to = getOperationalAlertRecipient()
+
+  console.log(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      event: 'alert',
+      kind: 'MANUAL_SESSION_REQUIRED',
+      accountId: input.accountId,
+      to,
+    }),
+  )
+
+  const resend = await sendResendEmail({
+    to,
+    subject: input.subject,
+    text: input.text,
+  })
+
+  if (resend.sent) {
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        event: 'alert.manual_session_sent',
+        accountId: input.accountId,
+        resendId: resend.id,
+        to,
+      }),
+    )
+    return
+  }
+
+  console.log(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      event: 'alert.manual_session_skipped',
+      accountId: input.accountId,
+      reason: resend.reason,
+      error: resend.error,
+      to,
+    }),
+  )
 }

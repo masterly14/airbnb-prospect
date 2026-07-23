@@ -14,7 +14,7 @@ Plan técnico derivado de [`OPERACION-PROSPECCION.md`](./OPERACION-PROSPECCION.m
 | **ICP** | Superhost, 10–25 props, sin hotel/loft — **constantes estáticas en código** |
 | **Conversación** | Plantillas estáticas + regex (sin LLM en runtime) |
 | **Notificaciones** | Solo **Resend** → `svaron066@gmail.com` |
-| **Proxies** | **EProxies** residencial, 1 IP fija por cuenta |
+| **Proxies** | **Decodo** residencial, 1 IP fija por cuenta |
 | **Onboarding cuentas** | Dashboard + Composio (Gmail/OTP) + credenciales Airbnb |
 
 ### Estado actual vs objetivo
@@ -27,7 +27,7 @@ Plan técnico derivado de [`OPERACION-PROSPECCION.md`](./OPERACION-PROSPECCION.m
 | `isSuperhost` en DB | ✅ | — |
 | Persistencia rate limits | ✅ | — |
 | Multi-cuenta + rotación | ✅ | — |
-| EProxies por cuenta | ✅ | — |
+| Decodo por cuenta | ✅ | — |
 | UI onboarding Composio | ✅ parcial | Fase D (Connect + OTP; verify login pendiente) |
 | Resend en handoff | ✅ | Fase E parcial (handoff email); prod 24/7 pendiente |
 | Prod 24/7 con 5 cuentas | ❌ | Fase E |
@@ -49,7 +49,7 @@ Plan técnico derivado de [`OPERACION-PROSPECCION.md`](./OPERACION-PROSPECCION.m
 ```mermaid
 flowchart LR
   A[Fase A\nICP + Lead] --> B[Fase B\nBloqueos DB]
-  B --> C[Fase C\n5 cuentas + EProxies]
+  B --> C[Fase C\n5 cuentas + Decodo]
   C --> D[Fase D\nUI onboarding]
   D --> E[Fase E\nResend + Prod 24/7]
 ```
@@ -58,7 +58,7 @@ flowchart LR
 |------|--------|-------------------|--------------|
 | **A** | ICP y datos de lead | 3–5 días | — ✅ *2026-07-04* |
 | **B** | Persistencia de bloqueos | 2–3 días | A ✅ *2026-07-04* |
-| **C** | Multi-cuenta + EProxies + rotación | 5–8 días | A, B ✅ *2026-07-04* |
+| **C** | Multi-cuenta + Decodo + rotación | 5–8 días | A, B ✅ *2026-07-04* |
 | **D** | UI onboarding Composio | 4–6 días | C (modelo `ProspectAccount`) |
 | **E** | Resend + despliegue 24/7 | 3–5 días | C, D parcial |
 
@@ -156,7 +156,7 @@ Ver schema propuesto en `OPERACION-PROSPECCION.md` §4.3. Campos adicionales rec
 
 ---
 
-## 6. Fase C — Multi-cuenta, EProxies y rotación ✅ *2026-07-04*
+## 6. Fase C — Multi-cuenta, Decodo y rotación ✅ *2026-07-04*
 
 **Objetivo:** 5 cuentas operando en cascada con ~600 msgs/semana (~85/día, 2 oleadas).
 
@@ -168,8 +168,8 @@ Ver schema propuesto en `OPERACION-PROSPECCION.md` §4.3. Campos adicionales rec
 | C2 | Account selector | `apps/scraper/src/accounts/account-selector.ts` (nuevo) | `pickNextAccount()`: ACTIVE, `cooldownUntil` pasado, menor `waveMessagesSent` |
 | C3 | Fin de oleada | `account-selector.ts` | Si `waveMessagesSent >= OPERATIONS.MSGS_PER_WAVE` → COOLDOWN + rotar |
 | C4 | Reactivación cron | `account-reaper.ts` o job QStash | Cada 15 min: cuentas con `cooldownUntil < now` → ACTIVE, reset `waveMessagesSent` |
-| C5 | Playwright por cuenta | `session-utils.ts`, `outbound-run.ts`, `harvest-run.ts`, `inbound-run.ts` | `launchContextForAccount(account)` con proxy EProxies + storage state |
-| C6 | Proxy EProxies | `playwright-context.ts` (nuevo) | `proxy: { server, username, password }` desde `ProspectAccount` |
+| C5 | Playwright por cuenta | `session-utils.ts`, `outbound-run.ts`, `harvest-run.ts`, `inbound-run.ts` | `launchContextForAccount(account)` con proxy Decodo + storage state |
+| C6 | Proxy Decodo | `playwright-context.ts` (nuevo) | `proxy: { server, username, password }` desde `ProspectAccount` |
 | C7 | Refactor auth | `tests/helpers/airbnb-auth.ts` | Acepta `accountId`, `composioUserId`, credenciales por cuenta |
 | C8 | Cuotas por ciudad | `outbound-pipeline.ts` | `findEligibleColdLeads` filtra por `market` y cuota diaria (Bogotá 43, Medellín 43) |
 | C9 | Contador diario | `Lead` o tabla `DailyOutboundStats` | Track msgs fríos/día/ciudad para no exceder cuota |
@@ -219,7 +219,7 @@ outbound-run:
 | D1 | Página cuentas | `apps/web/app/settings/accounts/page.tsx` | Lista: label, email, status, msgs hoy, cooldown |
 | D2 | API cuentas | `apps/web/app/api/accounts/route.ts`, `[id]/route.ts` | GET list, POST create, PATCH status |
 | D3 | Composio Connect | `apps/web/app/api/accounts/[id]/composio/connect`, `composio/callback` | ✅ OAuth por cuenta; persiste `composioUserId` + `composioConnectionId` |
-| D4 | Form credenciales | componente en settings | Email Airbnb, password, label, proxy EProxies (4 campos) |
+| D4 | Form credenciales | componente en settings | Email Airbnb, password, label, proxy Decodo (4 campos) |
 | D5 | Job verificación | `apps/scraper/scripts/verify-account-login.ts` | ⏳ Pendiente: login + 2FA Composio + guarda session |
 | D6 | Estados UI | enum en UI | ✅ `PENDING_GMAIL` → `PENDING_CREDENTIALS` → `ACTIVE` (VERIFYING en iteración posterior) |
 | D7 | Seguridad | API routes | Auth `DASHBOARD_TOKEN`; password nunca en logs; cifrado at-rest |
@@ -291,7 +291,7 @@ Cuerpo mínimo:
 
 - [x] Reunión simulada → email Resend con plantilla handoff (E2)
 - [ ] 24 h en staging sin mutex stuck
-- [ ] 5 cuentas ACTIVE en prod con EProxies
+- [ ] 5 cuentas ACTIVE en prod con Decodo
 - [ ] Métrica: ~85 msgs fríos/día sostenidos 3 días (objetivo soft)
 
 ---
@@ -309,7 +309,7 @@ Cuerpo mínimo:
 | `ICP_INCLUDE_OPTIONAL_MARKETS` | A | `true` → harvest incluye Cali + Bucaramanga |
 | ~~`SLACK_WEBHOOK_URL`~~ | E | **Opcional / no usar** |
 
-Las credenciales EProxies viven en **`ProspectAccount`**, no en `.env` global.
+Las credenciales por cuenta viven en **`ProspectAccount`**. El plan Decodo (`DECODO_USERNAME` / `DECODO_PASSWORD`) solo va en `.env` para `npm run proxy:assign-decodo`.
 
 ---
 
@@ -344,7 +344,7 @@ npx tsx apps/scraper/scripts/release-mutex.ts
 | Verificación identidad Airbnb | Cuenta BLOCKED | Resend + UI estado BLOCKED; intervención manual |
 | Mutex Playwright global | Deadlock 24/7 | Mutex por cuenta (C10) |
 | Credenciales en DB | Seguridad | Cifrado at-rest + nunca loguear |
-| EProxies caído | Cuenta no envía | Health check; skip cuenta; alerta Resend |
+| Decodo caído | Cuenta no envía | Health check; skip cuenta; alerta Resend |
 
 ---
 
@@ -359,7 +359,7 @@ npx tsx apps/scraper/scripts/release-mutex.ts
 - [x] Email Resend al entrar en cooldown (si `RESEND_API_KEY` configurado)
 
 ### Hito 3 — Multi-cuenta (fin Fase C)
-- 5 cuentas rotando con EProxies
+- 5 cuentas rotando con Decodo
 - ~50 msgs/oleada en prueba controlada
 
 ### Hito 4 — Self-service cuentas (fin Fase D)
@@ -377,7 +377,7 @@ npx tsx apps/scraper/scripts/release-mutex.ts
 1. ~~`feat/icp-static-module` — A1, A5, A9~~ ✅  
 2. ~~`feat/lead-superhost-migration` — A2, A3, A4, A6, A7, A8, A10~~ ✅  
 3. ~~`feat/account-block-events` — B1–B7~~ ✅  
-4. `feat/account-rotation-eproxies` — C1–C12 ← **siguiente**
+4. `feat/account-rotation-decodo` — C1–C12 ← **siguiente**
 5. `feat/dashboard-account-onboarding` — D1–D8  
 6. `feat/resend-handoff-prod-cron` — E1–E10  
 

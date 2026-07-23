@@ -1,9 +1,20 @@
 import { expect, Page } from '@playwright/test';
 import { dismissBlockingOverlays, ensureHomepageReady } from './airbnb-scraper';
 import { getAirbnbBaseUrl } from './airbnb-context';
+import {
+  getActionTimeoutMs,
+  gotoAndSettle,
+  waitForUiSettle,
+} from '../../src/scraping/page-timing';
 import { isTwoFactorModalVisible, passwordInput, submitTwoFactorCode, twoFactorHeading, passkeyLoginHeading, tryAnotherWayButton, emailCodeLoginOption, isOtpInputVisible } from './airbnb-2fa';
 import { waitForAirbnbOtp } from './composio-gmail';
 import { authLog, maskEmail } from './auth-logger';
+import { waitForSecurityChallengeIfPresent } from '../../src/scraping/security-challenge';
+import {
+  guestLoginMenuItem,
+  headerProfileMenuButton,
+  isLoggedInViaHeader,
+} from './airbnb-header';
 
 export const AUTH_SESSION_PATH = 'playwright/.auth/airbnb-session.json';
 
@@ -54,17 +65,10 @@ async function openLoginModal(page: Page) {
   await dismissBlockingOverlays(page);
 
   authLog('Paso 2/7', 'Abriendo menú de usuario');
-  const userMenu = page.getByRole('button', {
-    name: /main navigation menu|menú de navegación principal|menú principal/i,
-  });
-  await userMenu.click({ timeout: 10_000 });
+  await headerProfileMenuButton(page).click({ timeout: 10_000 });
 
   authLog('Paso 2/7', 'Seleccionando "Iniciar sesión"');
-  await page
-    .getByRole('menuitem', { name: /iniciar sesión|log in|sign in/i })
-    .or(page.getByRole('link', { name: /iniciar sesión|log in|sign in/i }))
-    .first()
-    .click();
+  await guestLoginMenuItem(page).click({ timeout: 10_000 });
 
   const loginModal = page
     .getByRole('dialog')
@@ -86,8 +90,9 @@ async function clickPrimaryContinue(page: Page) {
   });
 
   authLog('Paso 3/7', 'Haciendo clic en Continuar (email)');
-  await continueButton.waitFor({ state: 'visible', timeout: 10_000 });
-  await continueButton.click({ timeout: 10_000 });
+  await continueButton.waitFor({ state: 'visible', timeout: getActionTimeoutMs() });
+  await continueButton.click({ timeout: getActionTimeoutMs() });
+  await waitForUiSettle(page);
 }
 
 async function submitEmailStep(page: Page, email: string) {
@@ -102,7 +107,7 @@ async function submitEmailStep(page: Page, email: string) {
     name: /continúa con el correo electrónico|continue with email/i,
   });
 
-  if (await emailWithButton.isVisible({ timeout: 3_000 }).catch(() => false)) {
+  if (await emailWithButton.isVisible({ timeout: getActionTimeoutMs() / 3 }).catch(() => false)) {
     authLog('Paso 3/7', 'UI detectada: botón dedicado de correo electrónico');
     await emailWithButton.click();
     await modal
@@ -113,7 +118,7 @@ async function submitEmailStep(page: Page, email: string) {
     const unifiedInput = modal.getByRole('textbox', {
       name: /phone number or email|número de teléfono o correo|correo electrónico|email/i,
     });
-    await unifiedInput.waitFor({ state: 'visible', timeout: 10_000 });
+    await unifiedInput.waitFor({ state: 'visible', timeout: getActionTimeoutMs() });
     await unifiedInput.fill(email);
   }
 
@@ -149,7 +154,7 @@ async function handleRememberedAccountIfPresent(page: Page): Promise<void> {
   const welcomeBack = modal.getByText(/hola de nuevo|welcome back/i);
   const notYouLink = modal.getByRole('link', { name: /no eres tú|not you/i });
 
-  const isRemembered = await welcomeBack.isVisible({ timeout: 4_000 }).catch(() => false);
+  const isRemembered = await welcomeBack.isVisible({ timeout: getActionTimeoutMs() / 2 }).catch(() => false);
   if (!isRemembered) return;
 
   authLog('Paso 3b/7', 'UI detectada: cuenta recordada — pulsando Iniciar sesión');
@@ -157,17 +162,17 @@ async function handleRememberedAccountIfPresent(page: Page): Promise<void> {
   const loginButton = modal.getByRole('button', {
     name: /^iniciar sesión$|^log in$|^sign in$/i,
   });
-  if (await loginButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
-    await loginButton.click({ timeout: 10_000 });
-    await page.waitForTimeout(2_000);
+  if (await loginButton.isVisible({ timeout: getActionTimeoutMs() / 2 }).catch(() => false)) {
+    await loginButton.click({ timeout: getActionTimeoutMs() });
+    await waitForUiSettle(page);
     return;
   }
 
   // Fallback: "¿No eres tú?" fuerza flujo completo de credenciales.
-  if (await notYouLink.isVisible({ timeout: 2_000 }).catch(() => false)) {
+  if (await notYouLink.isVisible({ timeout: getActionTimeoutMs() / 4 }).catch(() => false)) {
     authLog('Paso 3b/7', 'Sin botón Iniciar sesión — usando "¿No eres tú?"');
-    await notYouLink.click({ timeout: 10_000 });
-    await page.waitForTimeout(2_000);
+    await notYouLink.click({ timeout: getActionTimeoutMs() });
+    await waitForUiSettle(page);
   }
 }
 
@@ -182,27 +187,27 @@ async function bypassPasskeyAndUseEmailCode(
   composioConnectionId?: string | null,
 ): Promise<boolean> {
   const passkeyVisible = await passkeyLoginHeading(page)
-    .isVisible({ timeout: 5_000 })
+    .isVisible({ timeout: getActionTimeoutMs() / 2 })
     .catch(() => false);
 
   if (passkeyVisible) {
     authLog('Paso 4/7', 'UI detectada: modal passkey — pulsando Intenta de otra forma');
-    await tryAnotherWayButton(page).click({ timeout: 10_000 });
-    await page.waitForTimeout(1_500);
+    await tryAnotherWayButton(page).click({ timeout: getActionTimeoutMs() });
+    await waitForUiSettle(page);
   }
 
   const emailOptionVisible = await emailCodeLoginOption(page)
-    .isVisible({ timeout: passkeyVisible ? 8_000 : 4_000 })
+    .isVisible({ timeout: passkeyVisible ? getActionTimeoutMs() : getActionTimeoutMs() / 2 })
     .catch(() => false);
 
   if (!emailOptionVisible) return false;
 
   authLog('Paso 4/7', 'Seleccionando OTP por correo electrónico');
   const otpRequestedAt = Date.now();
-  await emailCodeLoginOption(page).click({ timeout: 10_000 });
-  await page.waitForTimeout(2_000);
+  await emailCodeLoginOption(page).click({ timeout: getActionTimeoutMs() });
+  await waitForUiSettle(page);
 
-  await isOtpInputVisible(page, 20_000);
+  await isOtpInputVisible(page, getActionTimeoutMs());
   await handleTwoFactor(page, otpRequestedAt - 5_000, composioUserId, composioConnectionId);
   return true;
 }
@@ -210,29 +215,37 @@ async function bypassPasskeyAndUseEmailCode(
 async function detectPostEmailStep(page: Page): Promise<PostEmailStep> {
   authLog('Paso 4/7', 'Detectando siguiente pantalla: contraseña o 2FA');
 
-  const step = await Promise.race([
-    passwordInput(page)
-      .waitFor({ state: 'visible', timeout: 20_000 })
-      .then(() => 'password' as const),
-    twoFactorHeading(page)
-      .waitFor({ state: 'visible', timeout: 20_000 })
-      .then(() => '2fa' as const),
-  ]).catch(() => null);
+  const stepTimeout = getActionTimeoutMs();
 
-  if (!step) {
-    throw new Error(
-      'Tras el correo no apareció ni el campo de contraseña ni el modal 2FA',
-    );
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      authLog('Paso 4/7', `Reintento ${attempt + 1}/3 — esperando carga completa de la UI`);
+      await waitForUiSettle(page);
+    }
+
+    const step = await Promise.race([
+      passwordInput(page)
+        .waitFor({ state: 'visible', timeout: stepTimeout })
+        .then(() => 'password' as const),
+      twoFactorHeading(page)
+        .waitFor({ state: 'visible', timeout: stepTimeout })
+        .then(() => '2fa' as const),
+    ]).catch(() => null);
+
+    if (step) {
+      authLog(
+        'Paso 4/7',
+        step === 'password'
+          ? 'Pantalla de contraseña detectada'
+          : 'Modal 2FA detectado directamente (sin contraseña)',
+      );
+      return step;
+    }
   }
 
-  authLog(
-    'Paso 4/7',
-    step === 'password'
-      ? 'Pantalla de contraseña detectada'
-      : 'Modal 2FA detectado directamente (sin contraseña)',
+  throw new Error(
+    'Tras el correo no apareció ni el campo de contraseña ni el modal 2FA (conexión lenta: aumenta PLAYWRIGHT_SLOW_NETWORK=true o PLAYWRIGHT_ACTION_TIMEOUT_MS)',
   );
-
-  return step;
 }
 
 async function handleTwoFactor(
@@ -247,8 +260,40 @@ async function handleTwoFactor(
     connectionId: composioConnectionId ?? process.env.COMPOSIO_CONNECTION_ID ?? undefined,
   });
   await submitTwoFactorCode(page, code);
-  authLog('Paso 6/7', 'Verificación 2FA completada');
+  authLog('Paso 6/7', 'OTP enviado (modal cerrado ≠ sesión activa)');
   await dismissBlockingOverlays(page);
+  await waitForUiSettle(page);
+}
+
+/** Si tras el OTP Airbnb pide contraseña, la completa. */
+async function submitPasswordIfPrompted(
+  page: Page,
+  password: string,
+  composioUserId?: string | null,
+  composioConnectionId?: string | null,
+): Promise<boolean> {
+  if (!(await passwordInput(page).isVisible({ timeout: 4_000 }).catch(() => false))) {
+    return false
+  }
+
+  authLog('Paso 6b/7', 'Airbnb pidió contraseña tras OTP — enviándola');
+  await passwordInput(page).fill(password);
+  await page
+    .getByRole('button', { name: /^iniciar sesión$|^log in$|^sign in$/i })
+    .click();
+  await waitForUiSettle(page);
+  await waitForSecurityChallengeIfPresent(page);
+
+  if (await isTwoFactorModalVisible(page, 4_000)) {
+    await handleTwoFactor(
+      page,
+      Date.now() - 5_000,
+      composioUserId,
+      composioConnectionId,
+    );
+  }
+
+  return true
 }
 
 async function submitPasswordStep(
@@ -266,6 +311,9 @@ async function submitPasswordStep(
   await page
     .getByRole('button', { name: /^iniciar sesión$|^log in$|^sign in$/i })
     .click();
+
+  await waitForUiSettle(page);
+  await waitForSecurityChallengeIfPresent(page);
 
   authLog('Paso 6/7', 'Comprobando si Airbnb pide verificación 2FA');
   if (await isTwoFactorModalVisible(page)) {
@@ -289,18 +337,21 @@ export async function loginAirbnb(
   authLog('Inicio', `Flujo de login en ${baseUrl}`);
 
   authLog('Paso 1/7', 'Navegando a la homepage');
-  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+  await gotoAndSettle(page, baseUrl);
 
   authLog('Paso 1/7', 'Cerrando banners y modales iniciales');
   await dismissBlockingOverlays(page);
-  await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {
-    authLog('Paso 1/7', 'networkidle no alcanzado; continuando');
-  });
+  await waitForUiSettle(page);
   await dismissBlockingOverlays(page);
+
+  // Arkose a veces aparece al cargar la home (IP nueva / riesgo).
+  await waitForSecurityChallengeIfPresent(page);
 
   await openLoginModal(page);
   const otpRequestedAt = await submitEmailStep(page, email);
 
+  await waitForUiSettle(page);
+  await waitForSecurityChallengeIfPresent(page);
   await detectRateLimitOrBlock(page);
   await handleRememberedAccountIfPresent(page);
   await detectRateLimitOrBlock(page);
@@ -315,33 +366,39 @@ export async function loginAirbnb(
     const postEmailStep = await detectPostEmailStep(page);
     if (postEmailStep === '2fa') {
       await handleTwoFactor(page, otpRequestedAt - 5_000, composioUserId, composioConnectionId);
+      await submitPasswordIfPrompted(page, password, composioUserId, composioConnectionId);
     } else {
       await submitPasswordStep(page, password, composioUserId, composioConnectionId);
     }
+  } else {
+    await submitPasswordIfPrompted(page, password, composioUserId, composioConnectionId);
   }
 
-  authLog('Paso 7/7', 'Verificando que la sesión quedó activa');
+  authLog('Paso 7/7', 'Verificando que la sesión quedó activa en el header');
 
-  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+  await gotoAndSettle(page, baseUrl);
   authLog('Paso 7/7', 'Cerrando modales post-login (p. ej. tarifas incluidas)');
   await ensureHomepageReady(page);
+  await waitForSecurityChallengeIfPresent(page);
 
-  const profileLink = page.locator('a[href="/users/profile"]');
-  if (await profileLink.isVisible({ timeout: 10_000 }).catch(() => false)) {
-    authLog('Fin', 'Login exitoso — enlace a perfil visible');
-    return;
+  const loggedIn = await isLoggedInViaHeader(page);
+  if (!loggedIn) {
+    // Abrir menú para dejar evidencia clara en headed / logs.
+    const menu = headerProfileMenuButton(page);
+    if (await menu.isVisible({ timeout: 3_000 }).catch(() => false)) {
+      const expanded = await menu.getAttribute('aria-expanded').catch(() => null);
+      if (expanded !== 'true') await menu.click({ timeout: 5_000 }).catch(() => undefined);
+    }
+    const guestVisible = await guestLoginMenuItem(page)
+      .isVisible({ timeout: 2_000 })
+      .catch(() => false);
+
+    throw new Error(
+      guestVisible
+        ? 'Login falló: el header sigue mostrando "Iniciar sesión o registrarse" (OTP/modal cerró pero no hay sesión). Reintenta headed; si Airbnb pide password tras el OTP, debe completarse automáticamente.'
+        : 'Login falló: no se pudo confirmar sesión activa en el header tras OTP/password.',
+    );
   }
 
-  const userMenu = page
-    .getByRole('button', {
-      name: /main navigation menu|menú de navegación principal|menú principal/i,
-    })
-    .or(page.locator('nav').getByRole('button').last());
-
-  await userMenu.click({ timeout: 15_000 });
-  await expect(
-    page.getByRole('menuitem', { name: /iniciar sesión|log in|sign in/i }),
-  ).toHaveCount(0, { timeout: 20_000 });
-
-  authLog('Fin', 'Login exitoso — menú de usuario sin opción "Iniciar sesión"');
+  authLog('Fin', 'Login exitoso — header sin opción de invitado');
 }

@@ -1,6 +1,7 @@
 import type { Page, Response } from 'playwright'
 import { LeadStatus, type Lead } from '@repo/db'
 import { inboundLog } from '../logging/inbound-logger'
+import { outboundLog } from '../logging/outbound-logger'
 import {
   applyInboundDetected,
   OUTBOUND_ACTIVE_STATUSES,
@@ -10,7 +11,19 @@ import {
 } from '../persistence/inbound-pipeline'
 import { runConversationTurn } from '../conversation/run-conversation-turn'
 import { getAirbnbBaseUrl } from '../scraping/airbnb-context'
-import { dismissBlockingOverlays } from '../scraping/airbnb-scraper'
+import { waitForUiSettle } from '../scraping/page-timing'
+import {
+  extractHostReplyFromInboxPreview,
+  filterMeaningfulThreadMessages,
+  isAirbnbThreadNoise,
+  isOutboundTemplateEcho,
+  lastMeaningfulInbound,
+} from './thread-message-filters'
+import { navigateToGuestInbox } from './inbox-navigation'
+import { openThreadForMessaging, parseThreadIdFromUrl } from './thread-compose'
+
+export { isTravelerInboxFilterLabel } from './inbox-navigation'
+export { ensureTravelerInboxFilter } from './inbox-navigation'
 
 export type InboxThreadRef = {
   url: string
@@ -142,16 +155,15 @@ export async function collectInboxThreads(
   maxThreads: number,
 ): Promise<InboxThreadRef[]> {
   const base = getAirbnbBaseUrl()
-  await page.goto(`${base}/guest/messages`, { waitUntil: 'domcontentloaded' })
-  await dismissBlockingOverlays(page)
+  await navigateToGuestInbox(page)
 
   await page
     .locator('[data-testid^="inbox_list_"], [data-testid="inbox-container-marker"]')
     .first()
-    .waitFor({ state: 'attached', timeout: 20_000 })
+    .waitFor({ state: 'attached', timeout: 60_000 })
     .catch(() => {})
 
-  await page.waitForTimeout(2_000)
+  await waitForUiSettle(page)
 
   if (/\/login/.test(page.url())) {
     throw new Error('Inbox redirige a /login: sesión no autenticada.')
@@ -216,6 +228,10 @@ export function classifyMessageDirection(
 ): 'INBOUND' | 'OUTBOUND' {
   const normalized = text.trim()
   const firstLine = normalized.split('\n')[0]?.trim() ?? ''
+
+  if (isOutboundTemplateEcho(normalized)) {
+    return 'OUTBOUND'
+  }
 
   if (SELF_MARKERS.test(firstLine)) {
     return 'OUTBOUND'
@@ -312,52 +328,68 @@ export async function scrapeThreadMessages(
   page.on('response', onResponse)
 
   try {
-    await page.goto(lead.threadId!, { waitUntil: 'domcontentloaded' })
-    await dismissBlockingOverlays(page)
-    await page.waitForTimeout(1_500)
-
-    const messageNodes = page.locator(
-      '[data-testid="message"], [data-testid="thread-message"], [data-testid="msg-content"], [class*="message"]',
-    )
-
-    await page.mouse.wheel(0, 800)
-    await page.waitForTimeout(800)
-
-    const count = await messageNodes.count()
-    const domMessages: ScrapedThreadMessage[] = []
-
-    for (let i = 0; i < count && domMessages.length < maxMessages; i++) {
-      const node = messageNodes.nth(i)
-      const text = (await node.innerText().catch(() => '')).trim()
-      if (!text || text.length < 2) continue
-
-      domMessages.push({
-        direction: classifyMessageDirection(text, lead.name),
-        content: text,
-      })
+    if (!lead.threadId) {
+      throw new Error('Missing threadId for scrape')
     }
 
-    if (domMessages.length > 0) {
-      return domMessages.slice(-maxMessages)
+    // No enfocar el compositor al scrapear: eso dejaba el cursor “pillado” en el input.
+    await openThreadForMessaging(page, lead.threadId, { readyForSend: false })
+    await page.waitForTimeout(600)
+
+    // Extracción en un solo evaluate (evitar N×innerText sobre nodos amplios).
+    const rawTexts = await page.evaluate((limit) => {
+      const selectors = [
+        '[data-testid="message"]',
+        '[data-testid="thread-message"]',
+        '[data-testid="msg-content"]',
+        '[data-testid="message-content"]',
+      ]
+      const seen = new Set<string>()
+      const out: string[] = []
+      for (const sel of selectors) {
+        for (const el of document.querySelectorAll(sel)) {
+          const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
+          if (!text || text.length < 1 || seen.has(text)) continue
+          seen.add(text)
+          out.push(text)
+          if (out.length >= limit) return out
+        }
+      }
+      return out
+    }, maxMessages)
+
+    const domMessages: ScrapedThreadMessage[] = rawTexts.map((text) => ({
+      direction: classifyMessageDirection(text, lead.name),
+      content: text,
+    }))
+
+    let meaningful = filterMeaningfulThreadMessages(domMessages)
+
+    if (!lastMeaningfulInbound(meaningful)) {
+      const threadId = parseThreadIdFromUrl(lead.threadId)
+      if (threadId) {
+        const preview = await page
+          .locator(`[data-testid="inbox_list_${threadId}"]`)
+          .first()
+          .innerText()
+          .catch(() => '')
+        const fromPreview = extractHostReplyFromInboxPreview(preview, lead.name)
+        if (fromPreview) {
+          domMessages.push({ direction: 'INBOUND', content: fromPreview })
+          meaningful = filterMeaningfulThreadMessages(domMessages)
+        }
+      }
+    }
+
+    if (meaningful.length > 0) {
+      return meaningful.slice(-maxMessages)
     }
 
     if (fromApi.length > 0) {
-      return fromApi.slice(-maxMessages)
+      return filterMeaningfulThreadMessages(fromApi).slice(-maxMessages)
     }
 
-    const fallbackNodes = page.locator('main li, [role="listitem"]')
-    const fallbackCount = await fallbackNodes.count()
-
-    for (let i = 0; i < fallbackCount && domMessages.length < maxMessages; i++) {
-      const text = (await fallbackNodes.nth(i).innerText().catch(() => '')).trim()
-      if (!text || text.length < 5) continue
-      domMessages.push({
-        direction: classifyMessageDirection(text, lead.name),
-        content: text,
-      })
-    }
-
-    return domMessages.slice(-maxMessages)
+    return []
   } finally {
     page.off('response', onResponse)
   }
@@ -377,16 +409,19 @@ export async function pollLeadThread(page: Page, lead: Lead): Promise<PollLeadRe
   try {
     const scraped = await scrapeThreadMessages(page, lead)
     const syncResult = await syncThreadMessages(lead.id, scraped)
+    const scrapedHostReply = lastMeaningfulInbound(scraped)?.content ?? null
 
     inboundLog('inbound.sync.complete', {
       leadId: lead.id,
       inboundNew: syncResult.inboundNew,
       outboundSynced: syncResult.outboundSynced,
+      scrapedHostReply: scrapedHostReply?.slice(0, 120) ?? null,
     })
 
     let replied = false
+    const turnOptions = { scrapedHostReply }
 
-    if (syncResult.hostReplied) {
+    if (syncResult.hostReplied || scrapedHostReply) {
       const detectedAt = new Date()
 
       if (OUTBOUND_ACTIVE_STATUSES.includes(lead.status)) {
@@ -398,13 +433,13 @@ export async function pollLeadThread(page: Page, lead: Lead): Promise<PollLeadRe
           previousStatus: lead.status,
         })
         // 2.4 — Primer reply: clasifica (Triaje) y responde (Negociador).
-        await runConversationTurn(page, lead.id)
+        await runConversationTurn(page, lead.id, turnOptions)
       } else if (lead.status === LeadStatus.REPLIED_IN_PROGRESS) {
         await updateLastContactedIfInbound(lead.id, detectedAt)
         inboundLog('inbound.message.new', { leadId: lead.id, count: syncResult.inboundNew })
-        // 2.4 — Multi-turno: el host volvió a escribir mientras la IA tiene el control.
-        if (syncResult.inboundNew > 0) {
-          await runConversationTurn(page, lead.id)
+        // 2.4 — Multi-turno: usa scrape de Airbnb como fuente de verdad.
+        if (syncResult.inboundNew > 0 || scrapedHostReply) {
+          await runConversationTurn(page, lead.id, turnOptions)
         }
       }
     }

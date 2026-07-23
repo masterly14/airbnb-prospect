@@ -1,6 +1,26 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyMessageDirection, deriveHostNameFromInboxPreview, parseInboxListThreadId } from '../messaging/airbnb-inbox'
+import {
+  classifyMessageDirection,
+  deriveHostNameFromInboxPreview,
+  parseInboxListThreadId,
+} from '../messaging/airbnb-inbox'
+import { isTravelerInboxFilterLabel } from '../messaging/inbox-navigation'
+
+describe('isTravelerInboxFilterLabel', () => {
+  it('detects Spanish traveler filter label', () => {
+    assert.equal(isTravelerInboxFilterLabel('Modo viajero'), true)
+  })
+
+  it('detects English traveler filter label', () => {
+    assert.equal(isTravelerInboxFilterLabel('Traveler mode'), true)
+  })
+
+  it('rejects host/all filters', () => {
+    assert.equal(isTravelerInboxFilterLabel('Todos'), false)
+    assert.equal(isTravelerInboxFilterLabel('Anfitrión'), false)
+  })
+})
 
 describe('parseInboxListThreadId', () => {
   it('extracts numeric thread id from inbox_list test id', () => {

@@ -15,7 +15,16 @@ import {
   HarvestSearchBlockedError,
   HarvestSessionExpiredError,
 } from '../src/harvest/errors'
-import { harvestLog } from '../src/logging/harvest-logger'
+import {
+  harvestLog,
+  harvestTrace,
+  isHarvestDebugEnabled,
+  parseListingIdFromUrl,
+} from '../src/logging/harvest-logger'
+import {
+  getHarvestSendMax,
+  isHarvestSendUntilBlocked,
+} from '../src/discovery/harvest-send'
 import {
   buildSearchResultsUrl,
   getSearchDates,
@@ -41,7 +50,7 @@ import { AccountLoginPrerequisitesError } from '../src/accounts/account-login'
 import { openAccountBrowserSessionWithLogin } from '../src/accounts/account-browser-session'
 import { pickNextAccount } from '../src/accounts/account-selector'
 import { handleAccountBlock, markAccountSessionInvalid } from '../src/accounts/account-repository'
-import { sendAlert } from '../src/notifications/notify'
+import { requestManualSessionRemediation } from '../src/accounts/manual-session-remediation'
 import {
   isMvpSingleAccountMode,
   mvpModeLogContext,
@@ -71,6 +80,10 @@ export type HarvestReport = {
   errors: number
   enriched: number
   enrichFailed: number
+  /** Cold sends hechos en la misma sesión de harvest (ICP → escribir ya). */
+  sent: number
+  sendFailed: number
+  sendBlocked: boolean
   blockedMarkets: string[]
   leads: Array<{
     hostAirbnbId?: string
@@ -123,7 +136,18 @@ export async function runHarvest(
   }
 
   await acquireMutexWithRetry()
-  harvestLog('harvest.start', mvpModeLogContext())
+  harvestLog('harvest.start', {
+    ...mvpModeLogContext(),
+    harvestDebug: isHarvestDebugEnabled(),
+    sendImmediate: process.env.HARVEST_SEND_IMMEDIATE !== 'false',
+    sendUntilBlocked: isHarvestSendUntilBlocked(),
+    sendMax: getHarvestSendMax(),
+    maxListings: process.env.HARVEST_MAX_LISTINGS ?? '20',
+    maxPages: process.env.HARVEST_MAX_PAGES ?? process.env.HARVEST_MAX_PAGE ?? '1',
+    headed: process.env.HARVEST_HEADED === 'true',
+    icpMinProperties: process.env.ICP_MIN_PROPERTIES ?? '10',
+    icpMaxProperties: process.env.ICP_MAX_PROPERTIES ?? '25',
+  })
 
   const report: HarvestReport = {
     timestamp: new Date().toISOString(),
@@ -138,6 +162,9 @@ export async function runHarvest(
     errors: 0,
     enriched: 0,
     enrichFailed: 0,
+    sent: 0,
+    sendFailed: 0,
+    sendBlocked: false,
     blockedMarkets: [],
     leads: [],
   }
@@ -228,10 +255,13 @@ async function harvestWithAccountRotation(
     >['browser'] | null = null
 
     try {
-      const session = await openAccountBrowserSessionWithLogin(account, { headless })
+      const session = await openAccountBrowserSessionWithLogin(account, {
+        headless,
+        job: 'harvest',
+      })
       browser = session.browser
 
-      await harvestSingleMarket(session.page, report, market)
+      await harvestSingleMarket(session.page, report, market, account)
 
       harvestLog('harvest.account_complete', {
         accountId: account.id,
@@ -245,7 +275,16 @@ async function harvestWithAccountRotation(
       if (error instanceof HarvestSearchBlockedError) {
         const blockType =
           error.blocker === 'captcha' ? BlockType.CAPTCHA : BlockType.OTHER
-        await handleAccountBlock(account.id, error.message, blockType)
+        if (error.blocker === 'captcha') {
+          await requestManualSessionRemediation({
+            account,
+            reason: 'captcha',
+            message: error.message,
+            job: 'harvest',
+          })
+        } else {
+          await handleAccountBlock(account.id, error.message, blockType)
+        }
         if (!report.blockedMarkets.includes(market.name)) {
           report.blockedMarkets.push(market.name)
         }
@@ -273,14 +312,11 @@ async function harvestWithAccountRotation(
           accountLabel: account.label,
           reason: error instanceof Error ? error.message : String(error),
         })
-        await sendAlert({
-          kind: 'SESSION_EXPIRED',
-          title: `Cuenta "${account.label}" fuera de harvest`,
-          details: {
-            accountId: account.id,
-            airbnbEmail: account.airbnbEmail,
-            reason: error instanceof Error ? error.message : String(error),
-          },
+        await requestManualSessionRemediation({
+          account,
+          reason: 'session_expired',
+          message: error instanceof Error ? error.message : String(error),
+          job: 'harvest',
         })
         if (mvpMode) break
         continue
@@ -340,6 +376,7 @@ async function harvestSingleMarket(
   page: Page,
   report: HarvestReport,
   market: HarvestMarket,
+  account?: ProspectAccount,
 ): Promise<void> {
   if (!report.markets.includes(market.name)) {
     report.markets.push(market.name)
@@ -399,16 +436,36 @@ async function harvestSingleMarket(
       market: market.name,
       page: p,
       listings: listings.length,
+      debug: isHarvestDebugEnabled(),
     })
+    if (isHarvestDebugEnabled()) {
+      harvestTrace('page_listings', {
+        market: market.name,
+        page: p,
+        items: listings.map((l, i) => ({
+          index: i + 1,
+          listingId: parseListingIdFromUrl(l.url),
+          title: l.title,
+          url: l.url,
+          price: l.price,
+        })),
+      })
+    }
 
     if (listings.length === 0) break
 
     totalListings += listings.length
     pagesScraped++
 
-    const batch = await harvestListings(page, listings, undefined, market.name)
+    const batch = await harvestListings(page, listings, {
+      market: market.name,
+      accountId: account?.id,
+    })
     report.enriched += batch.enriched
     report.enrichFailed += batch.enrichFailed
+    report.sent += batch.sent
+    report.sendFailed += batch.sendFailed
+    if (batch.sendBlocked) report.sendBlocked = true
 
     for (const result of batch.results) {
       report.leads.push({
@@ -422,6 +479,25 @@ async function harvestSingleMarket(
       else if (result.action === 'updated') report.updated++
       else if (result.action === 'unchanged') report.unchanged++
       else if (result.action === 'skipped') report.skipped++
+    }
+
+    // Rate-limit / identity: cortar la corrida al primer bloqueo de Airbnb.
+    if (batch.sendBlocked) {
+      harvestLog('harvest.send.blocked_stop', {
+        market: market.name,
+        sent: report.sent,
+      })
+      break
+    }
+    // Tope de envíos (en until-blocked es alto; solo safety).
+    if (report.sent > 0 && report.sent >= getHarvestSendMax()) {
+      harvestLog('harvest.send.done_stop_pages', {
+        market: market.name,
+        sent: report.sent,
+        sendMax: getHarvestSendMax(),
+        untilBlocked: isHarvestSendUntilBlocked(),
+      })
+      break
     }
   }
 

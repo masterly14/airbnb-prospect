@@ -6,8 +6,13 @@ import { decryptSecret } from '@repo/crypto'
 import type { ProspectAccount } from '@repo/db'
 import { loginAirbnb, type AccountAuthConfig } from '../../tests/helpers/airbnb-auth'
 import { getColombiaContextOptions } from '../scraping/airbnb-context'
-import { accountSessionPath, persistAccountSessionState } from '../scraping/playwright-context'
+import {
+  accountSessionPath,
+  persistAccountSessionState,
+} from '../scraping/playwright-context'
+import { applyContextTimeouts } from '../scraping/page-timing'
 import { outboundLog } from '../logging/outbound-logger'
+import { maybeRemediateLoginFailure } from './manual-session-remediation'
 
 /**
  * La cuenta no tiene con qué re-loguearse por sí sola: falta contraseña
@@ -92,6 +97,9 @@ export async function loginAccountAndSaveSession(
   })
 
   const context = await browser.newContext(getColombiaContextOptions())
+  applyContextTimeouts(context)
+  // Login NO usa bandwidth saver: Arkose ("Verificación de seguridad") necesita
+  // imágenes/media/scripts. Bloquearlos deja el desafío en "Algo ha salido mal".
   const page = await context.newPage()
 
   try {
@@ -103,6 +111,8 @@ export async function loginAccountAndSaveSession(
       accountLabel: account.label,
       error: error instanceof Error ? error.message : String(error),
     })
+    // Captcha / login fallido → pausa cuenta + email a operador (svaron066).
+    await maybeRemediateLoginFailure(account, error, 'login')
     throw error
   }
 

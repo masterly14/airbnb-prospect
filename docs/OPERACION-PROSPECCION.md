@@ -12,7 +12,7 @@ Automatizar el embudo completo de prospección en Airbnb Colombia:
 Harvest → Outbound frío → Respuesta del host → Mensaje 2 → Handoff humano → CRM/Dashboard
 ```
 
-**Meta operativa (escala):** ~**600** primeros mensajes fríos por semana con **5 cuentas** en rotación 24/7, cada una con IP residencial EProxies distinta.
+**Meta operativa (escala):** ~**600** primeros mensajes fríos por semana con **5 cuentas** en rotación 24/7, cada una con IP residencial Decodo distinta.
 
 **Meta operativa (arranque):** ~100 prospectos/semana con 2 cuentas — fase de validación ya superada.
 
@@ -71,7 +71,7 @@ export const ICP = {
 | Verificación identidad | Modal de documento; resuelto manualmente en pruebas. |
 | Rate limit diario | Copy: *"Ya le has escrito a varios anfitriones… espera unas horas"*. |
 
-**Estrategia de cuentas:** rotación en **cascada** (no paralelo). Una cuenta activa a la vez; al bloquearse, pasar a la siguiente. Cada cuenta con **IP residencial fija** distinta (EProxies).
+**Estrategia de cuentas:** rotación en **cascada** (no paralelo). Una cuenta activa a la vez; al bloquearse, pasar a la siguiente. Cada cuenta con **IP residencial sticky** distinta (Decodo, 1 `session` id por cuenta).
 
 #### Rotación por oleadas (factor clave de capacidad)
 
@@ -112,7 +112,7 @@ Cuentas prospectadas a mano deben importarse al CRM para que el pipeline **no la
 - **Host interactuó** (interés/duda/ambiguo con respuesta) → `HUMAN_TAKEOVER` (IA pausada; humano continúa el hilo manual)
 - **Sin respuesta del host** → `INITIAL_MSG_SENT`
 
-**Red y proxy:** el sync opera **sin proxy de cuenta por defecto** (red directa). Usa `storageState` existente o auto-login vía Composio. El proxy residencial (Decodo) queda reservado para **outbound/harvest**. Antes de prospectar con las 3 cuentas, re-autenticar con proxy activo (`auth:verify-account`) para alinear sesión a IP residencial.
+**Red y proxy:** por defecto solo **outbound** y **login** (`auth:verify-account`) usan el proxy residencial de la cuenta. Harvest, inbound y sync van por **red directa** para ahorrar GB de Decodo. Playwright bloquea imágenes/media/fuentes/trackers (`PLAYWRIGHT_BLOCK_HEAVY_ASSETS`, default on). Antes de prospectar, re-autenticar con proxy (`auth:verify-account`) para anclar la sesión a la IP residencial.
 
 ```powershell
 # Sincroniza las cuentas manuales conocidas (sin proxy por defecto)
@@ -240,7 +240,7 @@ Con 5 cuentas el volumen baja; **2 ciudades bastan** para arrancar escala. Repar
 | Mercados | ✅ Default Bogotá + Medellín; Cartagena fuera; Cali/Bucaramanga opt-in | ~~Cartagena en default~~ |
 | Rate limit | ✅ Evento en `AccountBlockEvent` + cuenta en `COOLDOWN` | ~~Solo detectar y lanzar error~~ |
 | Multi-cuenta | Un solo `airbnb-session.json` | Modelo `ProspectAccount` + rotación |
-| Proxies | Sin proxy | **EProxies** residencial por cuenta |
+| Proxies | Sin proxy | **Decodo** residencial sticky por cuenta |
 | Onboarding cuenta | Script CLI `npm run auth:login` | **UI en dashboard** con Composio + formulario |
 | Email reunión | ✅ Handoff Resend | `handoff-email.ts` + `applyHumanTakeover` |
 
@@ -281,10 +281,13 @@ model ProspectAccount {
   airbnbEmail     String   @unique
   // credenciales: cifradas o referencia a secret manager
   composioUserId  String   // Gmail OAuth para OTP
-  proxyHost       String?  // EProxies endpoint
+  proxyHost       String?  // Decodo endpoint (gate.decodo.com)
   proxyPort       Int?
-  proxyUser       String?
+  proxyUser       String?  // user-…-session-…-sessionduration-…
   proxyPassEnc    String?
+  proxyProvider  String?  // "decodo"
+  proxySessionId  String?  // sticky session id único por cuenta
+  proxyCountry    String?  // ISO-2, p.ej. "co"
   sessionPath     String?  // ruta al storage state de Playwright
   messagesSentToday Int    @default(0)
   status          AccountStatus @default(ACTIVE)
@@ -304,12 +307,15 @@ model AccountBlockEvent {
 }
 ```
 
-### 4.4 Proxies residenciales — EProxies
+### 4.4 Proxies residenciales — Decodo
 
-- Proveedor acordado: **EProxies** (proxies residenciales).
-- **Un proxy fijo por cuenta** de Airbnb (no rotar IP dentro de la misma sesión).
-- Playwright debe lanzarse con `proxy: { server, username, password }` según la cuenta activa.
-- Variables de conexión por cuenta se guardan en `ProspectAccount`, no en `.env` global.
+- Proveedor acordado: **Decodo** (ex-Smartproxy), residential sticky.
+- Endpoint: `gate.decodo.com:7000`. Targeting Colombia: `country-co` en el username.
+- **Una sticky session por cuenta** Airbnb (`session-<id>` distinto; no compartir entre cuentas).
+- Sticky hasta 24 h (`sessionduration-1440`). Si el nodo residencial cae, la IP puede rotar antes.
+- Playwright se lanza con `proxy: { server, username, password }` desde `ProspectAccount`.
+- Credenciales del plan (`DECODO_USERNAME` / `DECODO_PASSWORD`) viven en `.env` solo para el script de asignación; por cuenta se guardan en `ProspectAccount`.
+- Asignación: `npm run proxy:assign-decodo` (opcional `--dry-run`, `--test-only`, `--email`).
 
 ### 4.5 Interfaz de onboarding de cuentas
 
@@ -332,7 +338,7 @@ Flujo acordado para conectar una cuenta nueva desde el **dashboard**:
               │  Formulario:                  │
               │  • Email Airbnb               │
               │  • Contraseña Airbnb          │
-              │  • Proxy EProxies (opcional   │
+              │  • Proxy Decodo (opcional    │
               │    o auto-asignado)           │
               │  • Etiqueta de cuenta         │
               └───────────────────────────────┘
@@ -383,13 +389,13 @@ La secuencia minimiza riesgo: primero corregir calidad del embudo (ICP + datos),
 
 **Entregable:** visibilidad de cuándo y por qué se frenó el outbound. **Setup:** `npm run seed:legacy-account` + `npm run db:migrate`.
 
-### Fase C — Multi-cuenta + EProxies ✅ *2026-07-04*
+### Fase C — Multi-cuenta + Decodo ✅ *2026-07-04* (proxy migrado a Decodo 2026-07-16)
 
 | # | Estado | Tarea | Detalle |
 |---|--------|-------|---------|
 | C1 | ✅ | Modelo `ProspectAccount` completo | `airbnbPasswordEnc`, `proxyPassEnc`, `DailyOutboundStats`, `Message.prospectAccountId`. |
 | C2 | ✅ | Selector de cuenta activa | `account-selector.ts`: cascada por `waveMessagesSent` + cooldown. |
-| C3 | ✅ | Playwright context por cuenta | `playwright-context.ts`: proxy EProxies + storage state por cuenta. |
+| C3 | ✅ | Playwright context por cuenta | `playwright-context.ts`: proxy Decodo + storage state por cuenta. |
 | C4 | ✅ | Rotación automática | `outbound-run.ts` + `account-reaper.ts` (cron QStash cada 15 min). |
 | C5 | ✅ | Límite ~10 msgs/oleada/cuenta | `OPERATIONS.MSGS_PER_WAVE` + `completeWave`. |
 | C6 | ✅ | Reparto por ciudad | Cuotas Bogotá/Medellín 43/43 vía `DailyOutboundStats`. |
@@ -496,7 +502,7 @@ Lead de prueba frecuente: Juan Jose — `d4bee589-11a5-4131-9236-38dbb803aad7` (
 | Regex para clasificar respuestas | ✅ Acordado e implementado |
 | ICP vía variables de entorno | ❌ Descartado → **estático en código** ✅ |
 | Multi-cuenta en paralelo | ❌ Descartado → **cascada** |
-| Proxies datacenter | ❌ Descartado → **EProxies residencial** |
+| Proxies datacenter | ❌ Descartado → **Decodo residencial sticky** |
 | Onboarding solo CLI | ❌ Descartado → **UI dashboard + Composio** |
 | Notificaciones Slack | ❌ Descartado → **solo Resend** |
 | Cartagena como mercado | ❌ Descartado en operación |

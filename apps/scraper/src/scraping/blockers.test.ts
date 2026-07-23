@@ -10,6 +10,15 @@ describe('detectBlockersFromText', () => {
     )
   })
 
+  it('detects Spanish security verification (Arkose)', () => {
+    assert.equal(
+      detectBlockersFromText(
+        'Verificación de seguridad. Algo ha salido mal. Vuelva a cargar el desafío.',
+      ),
+      'captcha',
+    )
+  })
+
   it('detects network errors', () => {
     assert.equal(
       detectBlockersFromText('Something went wrong. Try again later.'),

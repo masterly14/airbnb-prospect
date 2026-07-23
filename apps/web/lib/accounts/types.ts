@@ -12,6 +12,9 @@ export type ProspectAccountSummary = {
   proxyHost: string | null
   proxyPort: number | null
   proxyUser: string | null
+  proxyProvider: string | null
+  proxySessionId: string | null
+  proxyCountry: string | null
   sessionPath: string | null
   messagesSentToday: number
   waveMessagesSent: number

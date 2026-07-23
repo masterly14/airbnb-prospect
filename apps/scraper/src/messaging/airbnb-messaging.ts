@@ -5,10 +5,19 @@ import { outboundLog } from '../logging/outbound-logger'
 import { dismissBlockingOverlays } from '../scraping/airbnb-scraper'
 import { getAirbnbBaseUrl } from '../scraping/airbnb-context'
 import { syncExistingColdThread } from './existing-thread-sync'
-import { extractThreadUrl, findExistingThreadForLead } from './thread-detection'
+import { extractThreadUrl } from './thread-detection'
 import { collectInboxThreads } from './airbnb-inbox'
+import {
+  clickThreadSendButton,
+  findMessageComposer,
+  openThreadForMessaging,
+  typeInComposer,
+  waitForThreadComposer,
+} from './thread-compose'
+import { getActionTimeoutMs } from '../scraping/page-timing'
 
-const TYPE_DELAY_MS = 45
+/** Delay solo para fallback de tipeo; el path principal usa insertText/fill. */
+const TYPE_DELAY_MS = 12
 const MESSAGES_BASE_PATH = '/guest/messages'
 
 export class AirbnbSendBlockedError extends Error {
@@ -40,7 +49,11 @@ export function classifyBlockType(message: string): BlockType {
     return BlockType.IDENTITY
   }
 
-  if (/captcha|robot|unusual traffic|comprueba que no eres un robot/i.test(lower)) {
+  if (
+    /captcha|robot|unusual traffic|comprueba que no eres un robot|verificaci[oó]n de seguridad|security verification|recargar desaf[ií]o|funcaptcha|arkose/i.test(
+      lower,
+    )
+  ) {
     return BlockType.CAPTCHA
   }
 
@@ -81,20 +94,24 @@ export type SendOutboundResult = {
 }
 
 export type ColdSendOptions = {
+  /** Listing ID esperado (rooms/X → contact_host/X). Si diverge, se loguea mismatch. */
+  expectedListingId?: string
   prospectAccountId?: string
 }
 
 const COMPOSER_SELECTOR =
-  'textarea[aria-label*="mensaje"], textarea[aria-label*="message"], textarea[data-testid="message-input"], textarea[placeholder*="mensaje"], textarea[placeholder*="message"], [data-testid="thread-message-input"] textarea, form textarea'
+  'textarea[aria-label*="mensaje"], textarea[aria-label*="message"], textarea[data-testid="message-input"], textarea[placeholder*="mensaje"], textarea[placeholder*="message"], [data-testid="thread-message-input"] textarea, form textarea, [data-testid="messaging-compose-bar"] [contenteditable="true"], [contenteditable="true"][role="textbox"]'
 
 /** Sonda rápida: ¿el anuncio expone un compositor de mensaje? */
 const COMPOSER_PROBE_MS = 8_000
 
-async function findMessageComposer(page: Page) {
-  const textarea = page.locator(COMPOSER_SELECTOR).first()
+async function findContactComposer(page: Page) {
+  const composer = await findMessageComposer(page)
+  if (composer) return composer
 
-  if (await textarea.isVisible({ timeout: 5_000 }).catch(() => false)) {
-    return textarea
+  const contactOnly = page.locator(`${COMPOSER_SELECTOR}, textarea`).first()
+  if (await contactOnly.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    return contactOnly
   }
 
   return page.locator('textarea').first()
@@ -128,12 +145,12 @@ async function clickSendButton(page: Page): Promise<void> {
   await sendButton.click({ timeout: 10_000 })
 }
 
-async function typeMessageHuman(page: Page, text: string): Promise<void> {
-  const composer = await findMessageComposer(page)
-  await composer.waitFor({ state: 'visible', timeout: 15_000 })
-  await composer.click({ timeout: 5_000 })
-  await composer.fill('')
-  await composer.pressSequentially(text, { delay: TYPE_DELAY_MS })
+async function typeMessageHuman(page: Page, text: string, options: { thread?: boolean } = {}): Promise<void> {
+  const composer = options.thread
+    ? await waitForThreadComposer(page)
+    : await findContactComposer(page)
+  await composer.waitFor({ state: 'visible', timeout: getActionTimeoutMs() })
+  await typeInComposer(composer, page, text, TYPE_DELAY_MS)
 }
 
 function extractThreadUrlFromPage(pageUrl: string): string | null {
@@ -251,16 +268,19 @@ async function waitForThreadUrl(page: Page, timeoutMs = 15_000): Promise<string 
   return extractThreadUrlFromPage(page.url())
 }
 
-async function openContactFromListing(page: Page): Promise<void> {
-  const listingMatch = page.url().match(/\/rooms\/(\d+)/)
-  if (listingMatch) {
-    const base = getAirbnbBaseUrl()
-    await page.goto(`${base}/contact_host/${listingMatch[1]}/send_message`, {
-      waitUntil: 'domcontentloaded',
-    })
+function buildContactHostUrl(listingUrl: string): string | null {
+  const listingMatch = listingUrl.match(/\/rooms\/(\d+)/)
+  if (!listingMatch) return null
+  return `${getAirbnbBaseUrl()}/contact_host/${listingMatch[1]}/send_message`
+}
+
+async function openContactFromListing(page: Page, listingUrl: string): Promise<string> {
+  const contactUrl = buildContactHostUrl(listingUrl) ?? buildContactHostUrl(page.url())
+  if (contactUrl) {
+    await page.goto(contactUrl, { waitUntil: 'domcontentloaded' })
     await dismissBlockingOverlays(page)
     await page.waitForTimeout(1_500)
-    return
+    return contactUrl
   }
 
   await page.mouse.wheel(0, 600)
@@ -278,6 +298,28 @@ async function openContactFromListing(page: Page): Promise<void> {
   await contactLink.scrollIntoViewIfNeeded()
   await contactLink.click({ timeout: 10_000 })
   await page.waitForTimeout(1_500)
+  return page.url()
+}
+
+/**
+ * Garantiza que seguimos en el formulario de contacto del listing.
+ * Nunca abrir el inbox aquí: roba el tab y el cold send termina tipando
+ * en un chat viejo (o esperando un textarea que no es el del host).
+ */
+async function ensureOnContactHostPage(page: Page, contactUrl: string): Promise<void> {
+  if (/\/contact_host\/\d+/.test(page.url())) return
+
+  outboundLog('outbound.send.recover_contact_page', {
+    fromUrl: page.url(),
+    contactUrl,
+  })
+  await page.goto(contactUrl, { waitUntil: 'domcontentloaded' })
+  await dismissBlockingOverlays(page)
+  await page.waitForTimeout(1_500)
+}
+
+function listingIdFromUrl(url: string): string | null {
+  return url.match(/\/rooms\/(\d+)/)?.[1] ?? url.match(/\/contact_host\/(\d+)/)?.[1] ?? null
 }
 
 export async function sendColdOutboundMessage(
@@ -286,36 +328,110 @@ export async function sendColdOutboundMessage(
   text: string,
   options: ColdSendOptions = {},
 ): Promise<SendOutboundResult> {
+  const expectedListingId =
+    options.expectedListingId ?? listingIdFromUrl(lead.primaryListingUrl) ?? undefined
+
   outboundLog('outbound.send.start', {
     leadId: lead.id,
     phase: 'PHASE_1_COLD',
     listingUrl: lead.primaryListingUrl,
+    listingName: lead.primaryListingName,
+    hostAirbnbId: lead.hostAirbnbId,
+    hostName: lead.name,
+    expectedListingId: expectedListingId ?? null,
   })
 
   try {
     await page.goto(lead.primaryListingUrl, { waitUntil: 'domcontentloaded' })
     await dismissBlockingOverlays(page)
     await page.waitForTimeout(1_500)
-    await openContactFromListing(page)
-    await page.mouse.wheel(0, 800)
-    await page.waitForTimeout(1_500)
 
-    let existingThread =
-      extractThreadUrlFromPage(page.url()) ?? (await findExistingThreadForLead(page, lead))
+    const pageListingId = listingIdFromUrl(page.url())
+    const pageTitle = (await page.locator('h1').first().innerText().catch(() => '')).trim()
+    outboundLog('outbound.send.listing_page', {
+      leadId: lead.id,
+      expectedListingId: expectedListingId ?? null,
+      pageListingId,
+      pageUrl: page.url(),
+      pageTitle: pageTitle || null,
+      leadListingName: lead.primaryListingName,
+      titleMismatch:
+        Boolean(pageTitle) &&
+        Boolean(lead.primaryListingName) &&
+        pageTitle.toLowerCase() !== lead.primaryListingName!.trim().toLowerCase(),
+      listingIdMismatch:
+        Boolean(expectedListingId) &&
+        Boolean(pageListingId) &&
+        expectedListingId !== pageListingId,
+    })
 
-    if (existingThread) {
+    if (
+      expectedListingId &&
+      pageListingId &&
+      expectedListingId !== pageListingId
+    ) {
+      outboundLog('outbound.send.listing_mismatch', {
+        stage: 'listing_page',
+        leadId: lead.id,
+        expectedListingId,
+        pageListingId,
+        listingUrl: lead.primaryListingUrl,
+        pageUrl: page.url(),
+      })
+    }
+
+    const contactUrl = await openContactFromListing(page, lead.primaryListingUrl)
+    const contactListingId = listingIdFromUrl(page.url()) ?? listingIdFromUrl(contactUrl)
+    outboundLog('outbound.send.contact_page', {
+      leadId: lead.id,
+      url: page.url(),
+      contactUrl,
+      expectedListingId: expectedListingId ?? null,
+      contactListingId,
+      listingIdMismatch:
+        Boolean(expectedListingId) &&
+        Boolean(contactListingId) &&
+        expectedListingId !== contactListingId,
+    })
+
+    if (
+      expectedListingId &&
+      contactListingId &&
+      expectedListingId !== contactListingId
+    ) {
+      outboundLog('outbound.send.listing_mismatch', {
+        stage: 'contact_page',
+        leadId: lead.id,
+        expectedListingId,
+        contactListingId,
+        contactUrl,
+        pageUrl: page.url(),
+      })
+      return { success: false, error: 'listing_id_mismatch' }
+    }
+
+    // Airbnb redirige contact_host → /guest/messages/{id} si ya existe hilo.
+    // NO escanear el inbox proactivamente: collectInboxThreads() navega allí y
+    // deja la página en un chat viejo (p. ej. David/Esteban), rompiendo el envío.
+    const redirectedThread = extractThreadUrlFromPage(page.url())
+    if (redirectedThread) {
       outboundLog('outbound.presend.existing_thread', {
         leadId: lead.id,
-        threadId: existingThread,
+        threadId: redirectedThread,
+        source: 'contact_host_redirect',
       })
-      await syncExistingColdThread(page, lead, existingThread, options.prospectAccountId)
+      await syncExistingColdThread(page, lead, redirectedThread, options.prospectAccountId)
       return {
         success: false,
         error: 'existing_thread',
-        threadId: existingThread,
+        threadId: redirectedThread,
         skippedReason: 'existing_thread',
       }
     }
+
+    await ensureOnContactHostPage(page, contactUrl)
+    await page.mouse.wheel(0, 800)
+    await page.waitForTimeout(1_000)
 
     // Fallar rápido si el anuncio no es contactable, en vez de agotar los 15s
     // de cada locator de envío. Un blocker (rate limit/identidad) tiene
@@ -325,8 +441,22 @@ export async function sendColdOutboundMessage(
       outboundLog('outbound.send.not_contactable', {
         leadId: lead.id,
         listingUrl: lead.primaryListingUrl,
+        url: page.url(),
       })
       return { success: false, error: 'listing_not_contactable' }
+    }
+
+    // Última salvaguarda: si el compositor está en /guest/messages, es el inbox
+    // equivocado — no escribir ahí.
+    if (/\/guest\/messages\//.test(page.url())) {
+      outboundLog('outbound.send.refusing_inbox_composer', {
+        leadId: lead.id,
+        url: page.url(),
+      })
+      await ensureOnContactHostPage(page, contactUrl)
+      if (!(await hasContactComposer(page)) || /\/guest\/messages\//.test(page.url())) {
+        return { success: false, error: 'listing_not_contactable' }
+      }
     }
 
     await typeMessageHuman(page, text)
@@ -340,7 +470,28 @@ export async function sendColdOutboundMessage(
     await assertSendNotBlocked(page)
     await page.waitForTimeout(1_000)
 
-    let threadId = await waitForThreadUrl(page, 10_000)
+    // Airbnb a veces deja la confirmación "Mensaje enviado" en contact_host
+    // sin redirigir aún a /guest/messages/{id}.
+    const confirmedOnContact = await page
+      .getByRole('heading', { name: /mensaje enviado|message sent/i })
+      .or(page.getByText(/mensaje enviado|message sent/i))
+      .first()
+      .isVisible({ timeout: 3_000 })
+      .catch(() => false)
+
+    if (confirmedOnContact) {
+      outboundLog('outbound.send.confirmation_seen', {
+        leadId: lead.id,
+        url: page.url(),
+      })
+      const doneBtn = page.getByRole('button', { name: /^listo$|^done$/i }).first()
+      if (await doneBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+        await doneBtn.click().catch(() => {})
+        await page.waitForTimeout(1_000)
+      }
+    }
+
+    let threadId = await waitForThreadUrl(page, confirmedOnContact ? 5_000 : 10_000)
 
     if (!threadId) {
       threadId = await resolveThreadFromInboxAfterSend(page, lead)
@@ -353,12 +504,20 @@ export async function sendColdOutboundMessage(
       }
     }
 
-    outboundLog('outbound.send.success', { leadId: lead.id, threadId })
+    outboundLog('outbound.send.success', {
+      leadId: lead.id,
+      threadId,
+      confirmationSeen: confirmedOnContact,
+    })
     return { success: true, threadId }
   } catch (error) {
     if (error instanceof AirbnbSendBlockedError) throw error
     const message = error instanceof Error ? error.message : String(error)
-    outboundLog('outbound.send.failed', { leadId: lead.id, error: message })
+    outboundLog('outbound.send.failed', {
+      leadId: lead.id,
+      error: message,
+      url: page.url(),
+    })
     return { success: false, error: message }
   }
 }
@@ -380,11 +539,17 @@ export async function sendThreadOutboundMessage(
   })
 
   try {
-    await page.goto(lead.threadId, { waitUntil: 'domcontentloaded' })
-    await dismissBlockingOverlays(page)
-    await page.waitForTimeout(1_500)
-    await typeMessageHuman(page, text)
-    await clickSendButton(page)
+    await openThreadForMessaging(page, lead.threadId)
+    await typeMessageHuman(page, text, { thread: true })
+    // Confirmar que el compositor tiene texto antes de pulsar enviar (botón flecha).
+    const composer = await findMessageComposer(page)
+    const typed = composer
+      ? ((await composer.innerText().catch(() => '')) || '').trim()
+      : ''
+    if (typed.length < 20) {
+      throw new Error(`Composer vacío tras tipeo (len=${typed.length}); no se envía.`)
+    }
+    await clickThreadSendButton(page)
     await page.waitForTimeout(2_000)
     await assertSendNotBlocked(page)
 

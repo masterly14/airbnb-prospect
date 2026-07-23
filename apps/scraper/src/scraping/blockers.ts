@@ -3,7 +3,11 @@ import type { Page } from 'playwright'
 export type PageBlocker = 'ok' | 'captcha' | 'session_expired' | 'network'
 
 export function detectBlockersFromText(bodyText: string): PageBlocker {
-  if (/captcha|verify you are human|access denied|robot check|not a robot/i.test(bodyText)) {
+  if (
+    /captcha|verify you are human|access denied|robot check|not a robot|verificaci[oó]n de seguridad|security verification|recargar desaf[ií]o|funcaptcha|arkose/i.test(
+      bodyText,
+    )
+  ) {
     return 'captcha'
   }
 

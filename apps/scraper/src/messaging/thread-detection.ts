@@ -7,6 +7,15 @@ export function extractThreadUrl(pageUrl: string): string | null {
   return match?.[1] ?? null
 }
 
+/**
+ * Escanea el inbox buscando un hilo previo con este lead.
+ *
+ * ⚠️ Navega a `/guest/messages` y deja la página ahí. NO usar en medio de un
+ * cold send sobre `/contact_host/...` — roba el tab y el compositor del inbox
+ * puede hacer que se escriba en un chat viejo. Preferir:
+ * - redirect de Airbnb desde contact_host → guest/messages
+ * - ledger HostContact / threadId en DB
+ */
 export async function findExistingThreadForLead(page: Page, lead: Lead): Promise<string | null> {
   const fromUrl = extractThreadUrl(page.url())
   if (fromUrl) return fromUrl

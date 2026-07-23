@@ -10,6 +10,7 @@ export type { ComposioConfig } from "@repo/composio"
 export type GmailMessage = {
   messageId?: string
   subject?: string
+  from?: string
   internalDate?: number | string
   body?: string
   snippet?: string
@@ -109,11 +110,21 @@ function normalizeMessage(raw: unknown): GmailMessage | null {
   const headers = asRecord(payload)?.headers ?? record.headers
 
   let subject = typeof record.subject === "string" ? record.subject : undefined
-  if (!subject && Array.isArray(headers)) {
-    const subjectHeader = headers.find(
-      (h) => asRecord(h)?.name?.toString().toLowerCase() === "subject",
-    )
-    subject = asRecord(subjectHeader)?.value?.toString()
+  let from = typeof record.from === "string" ? record.from : undefined
+  if (!from && typeof record.sender === "string") from = record.sender
+  if (Array.isArray(headers)) {
+    if (!subject) {
+      const subjectHeader = headers.find(
+        (h) => asRecord(h)?.name?.toString().toLowerCase() === "subject",
+      )
+      subject = asRecord(subjectHeader)?.value?.toString()
+    }
+    if (!from) {
+      const fromHeader = headers.find(
+        (h) => asRecord(h)?.name?.toString().toLowerCase() === "from",
+      )
+      from = asRecord(fromHeader)?.value?.toString()
+    }
   }
 
   const body =
@@ -126,6 +137,7 @@ function normalizeMessage(raw: unknown): GmailMessage | null {
   return {
     messageId: record.messageId?.toString() ?? record.id?.toString(),
     subject,
+    from,
     internalDate: parseInternalDate(
       record.internalDate ?? record.internal_date ?? record.messageTimestamp,
     ),
@@ -134,16 +146,29 @@ function normalizeMessage(raw: unknown): GmailMessage | null {
   }
 }
 
-function extractMessages(result: unknown): GmailMessage[] {
+function extractGmailFetchResult(result: unknown): {
+  messages: GmailMessage[]
+  nextPageToken?: string
+} {
   const root = asRecord(result)
   const data = asRecord(root?.data) ?? root
-  const messages = data?.messages ?? data?.emails ?? data?.items
+  const nestedResponse = asRecord(data?.response)
+  const nestedData = asRecord(nestedResponse?.data) ?? nestedResponse
+  const payload = nestedData ?? data
 
-  if (!Array.isArray(messages)) return []
+  const messagesRaw = payload?.messages ?? payload?.emails ?? payload?.items
+  const messages = Array.isArray(messagesRaw)
+    ? messagesRaw
+        .map(normalizeMessage)
+        .filter((message): message is GmailMessage => message !== null)
+    : []
 
-  return messages
-    .map(normalizeMessage)
-    .filter((message): message is GmailMessage => message !== null)
+  const nextPageToken =
+    (typeof payload?.nextPageToken === "string" && payload.nextPageToken) ||
+    (typeof data?.nextPageToken === "string" && data.nextPageToken) ||
+    undefined
+
+  return { messages, nextPageToken }
 }
 
 function isConnectedAccountNotFound(error: unknown): boolean {
@@ -151,20 +176,42 @@ function isConnectedAccountNotFound(error: unknown): boolean {
   return cause?.error?.error?.slug === "ActionExecute_ConnectedAccountNotFound"
 }
 
+export type FetchGmailEmailsOptions = {
+  query?: string
+  maxResults?: number
+  includePayload?: boolean
+  pageToken?: string
+}
+
+export type GmailEmailsPage = {
+  messages: GmailMessage[]
+  nextPageToken?: string
+}
+
 async function executeGmailFetch(
   composio: Composio,
   config: ComposioConfig,
   includeConnectionId: boolean,
+  fetchOptions: FetchGmailEmailsOptions = {},
 ): Promise<unknown> {
+  const argumentsPayload: Record<string, unknown> = {
+    max_results: fetchOptions.maxResults ?? 10,
+    include_payload: fetchOptions.includePayload ?? true,
+    verbose: true,
+  }
+
+  if (fetchOptions.query !== undefined) {
+    argumentsPayload.query = fetchOptions.query
+  }
+
+  if (fetchOptions.pageToken) {
+    argumentsPayload.page_token = fetchOptions.pageToken
+  }
+
   const params: Parameters<Composio["tools"]["execute"]>[1] = {
     userId: config.userId,
     version: config.gmailToolkitVersion,
-    arguments: {
-      query: GMAIL_QUERY,
-      max_results: 10,
-      include_payload: true,
-      verbose: true,
-    },
+    arguments: argumentsPayload,
   }
 
   if (includeConnectionId && config.connectionId) {
@@ -194,14 +241,10 @@ function resolveConfig(configOverride?: Partial<Pick<ComposioConfig, "userId" | 
   )
 }
 
-export async function fetchLatestAirbnbEmails(
-  configOrOverride?: ComposioConfig | Partial<Pick<ComposioConfig, "userId" | "connectionId">>,
-): Promise<GmailMessage[]> {
-  const config =
-    configOrOverride && "apiKey" in configOrOverride
-      ? configOrOverride
-      : resolveConfig(configOrOverride)
-
+async function fetchGmailEmailsPageInternal(
+  config: ComposioConfig,
+  fetchOptions: FetchGmailEmailsOptions = {},
+): Promise<GmailEmailsPage> {
   const composio = new Composio({
     apiKey: config.apiKey,
     toolkitVersions: { gmail: config.gmailToolkitVersion },
@@ -209,10 +252,10 @@ export async function fetchLatestAirbnbEmails(
 
   let result: unknown
   try {
-    result = await executeGmailFetch(composio, config, Boolean(config.connectionId))
+    result = await executeGmailFetch(composio, config, Boolean(config.connectionId), fetchOptions)
   } catch (error) {
     if (config.connectionId && isConnectedAccountNotFound(error)) {
-      result = await executeGmailFetch(composio, config, false)
+      result = await executeGmailFetch(composio, config, false, fetchOptions)
     } else {
       const cause = (error as { cause?: { error?: { error?: { message?: string } } } }).cause?.error
         ?.error?.message
@@ -223,10 +266,69 @@ export async function fetchLatestAirbnbEmails(
     }
   }
 
-  const messages = extractMessages(result)
-  return messages.sort(
+  const page = extractGmailFetchResult(result)
+  page.messages.sort(
     (a, b) => parseInternalDate(b.internalDate) - parseInternalDate(a.internalDate),
   )
+  return page
+}
+
+export async function fetchGmailEmailsPage(
+  configOrOverride?: ComposioConfig | Partial<Pick<ComposioConfig, "userId" | "connectionId">>,
+  fetchOptions: FetchGmailEmailsOptions = {},
+): Promise<GmailEmailsPage> {
+  const config =
+    configOrOverride && "apiKey" in configOrOverride
+      ? configOrOverride
+      : resolveConfig(configOrOverride)
+
+  return fetchGmailEmailsPageInternal(config, fetchOptions)
+}
+
+export async function fetchGmailEmails(
+  configOrOverride?: ComposioConfig | Partial<Pick<ComposioConfig, "userId" | "connectionId">>,
+  fetchOptions: FetchGmailEmailsOptions & { totalLimit?: number } = {},
+): Promise<GmailMessage[]> {
+  const config =
+    configOrOverride && "apiKey" in configOrOverride
+      ? configOrOverride
+      : resolveConfig(configOrOverride)
+
+  const totalLimit = fetchOptions.totalLimit ?? fetchOptions.maxResults ?? 10
+  const pageSize = Math.min(500, totalLimit)
+  const collected: GmailMessage[] = []
+  const seenIds = new Set<string>()
+  let pageToken = fetchOptions.pageToken
+
+  while (collected.length < totalLimit) {
+    const remaining = totalLimit - collected.length
+    const page = await fetchGmailEmailsPageInternal(config, {
+      ...fetchOptions,
+      maxResults: Math.min(pageSize, remaining),
+      pageToken,
+    })
+
+    for (const message of page.messages) {
+      const id = message.messageId ?? ""
+      if (id && seenIds.has(id)) continue
+      if (id) seenIds.add(id)
+      collected.push(message)
+      if (collected.length >= totalLimit) break
+    }
+
+    if (!page.nextPageToken || page.messages.length === 0) break
+    pageToken = page.nextPageToken
+  }
+
+  return collected.sort(
+    (a, b) => parseInternalDate(b.internalDate) - parseInternalDate(a.internalDate),
+  )
+}
+
+export async function fetchLatestAirbnbEmails(
+  configOrOverride?: ComposioConfig | Partial<Pick<ComposioConfig, "userId" | "connectionId">>,
+): Promise<GmailMessage[]> {
+  return fetchGmailEmails(configOrOverride, { query: GMAIL_QUERY, maxResults: 10 })
 }
 
 export function findOtpInMessages(messages: GmailMessage[], sinceMs: number): string | null {

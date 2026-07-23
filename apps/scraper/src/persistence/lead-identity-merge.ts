@@ -132,7 +132,12 @@ export async function mergeLeadIntoCanonical(
         market: canonicalLead.market ?? duplicateLead.market,
         lastContactedAt: canonicalLead.lastContactedAt ?? duplicateLead.lastContactedAt,
         companyName: canonicalLead.companyName ?? duplicateLead.companyName,
-        primaryListingName: canonicalLead.primaryListingName ?? duplicateLead.primaryListingName,
+        // Preferir el listing del lead canónico (el recién cosechado) para no
+        // escribir a un primaryListingUrl viejo del alias/duplicate.
+        primaryListingUrl:
+          canonicalLead.primaryListingUrl || duplicateLead.primaryListingUrl,
+        primaryListingName:
+          canonicalLead.primaryListingName ?? duplicateLead.primaryListingName,
       },
     })
 

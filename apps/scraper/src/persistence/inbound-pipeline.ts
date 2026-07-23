@@ -1,4 +1,5 @@
 import { db, LeadStatus, MessageDirection, type Lead } from '@repo/db'
+import { lastMeaningfulInbound, isAirbnbThreadNoise } from '../messaging/thread-message-filters'
 
 export const INBOUND_POLL_STATUSES: LeadStatus[] = [
   LeadStatus.INITIAL_MSG_SENT,
@@ -143,6 +144,7 @@ export async function syncThreadMessages(
   for (const msg of scraped) {
     const content = msg.content.trim()
     if (!content || content.length < 2) continue
+    if (isAirbnbThreadNoise(content)) continue
 
     if (msg.direction === 'INBOUND') {
       if (await isDuplicateMessage(leadId, MessageDirection.INBOUND, content)) {

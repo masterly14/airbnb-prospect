@@ -268,7 +268,7 @@ Lo ya implementado: mutex `IS_PLAYWRIGHT_RUNNING`, workers harvest/outbound/inbo
 ```text
 [Fase A] ICP real (10–25, superhost, mercados) → ✅ HECHO (2026-07-04)
 [Fase B] Persistencia bloqueos + Resend cooldown   → ✅ HECHO (2026-07-04)
-[Fase C] Multi-cuenta + EProxies + rotación       → siguiente
+[Fase C] Multi-cuenta + Decodo + rotación       → siguiente
 [Fase D] UI onboarding Composio                   → pendiente
 [Fase E] Resend handoff                               → ✅ HECHO (2026-07-04); prod 24/7 pendiente
 ```

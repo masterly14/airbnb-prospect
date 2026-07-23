@@ -163,14 +163,25 @@ function AccountsSettingsContent() {
                     </TableCell>
                     <TableCell>
                       {account.composioConnectionId ? (
-                        <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                          <CheckCircle2 className="size-3.5" />
-                          <span>
-                            Conectado
-                            {account.composioConnectedAt
-                              ? ` · ${format(account.composioConnectedAt, "dd MMM yyyy", { locale: es })}`
-                              : ""}
-                          </span>
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+                            <CheckCircle2 className="size-3.5" />
+                            <span>
+                              Conectado
+                              {account.composioConnectedAt
+                                ? ` · ${format(account.composioConnectedAt, "dd MMM yyyy", { locale: es })}`
+                                : ""}
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs"
+                            disabled={connectingId === account.id || isPending}
+                            onClick={() => handleConnectGmail(account.id)}
+                          >
+                            {connectingId === account.id ? "Redirigiendo..." : "Reconectar Gmail"}
+                          </Button>
                         </div>
                       ) : (
                         <Button

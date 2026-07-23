@@ -13,8 +13,12 @@ import {
 import { dismissBlockingOverlays } from '../scraping/airbnb-scraper'
 import {
   buildProxyOption,
+  installBandwidthSaver,
   resolveSessionPathForAccount,
+  shouldUseAccountProxyForJob,
 } from '../scraping/playwright-context'
+import { ensureTravelerInboxFilter } from '../messaging/inbox-navigation'
+import { applyContextTimeouts, gotoAndSettle } from '../scraping/page-timing'
 
 export type SyncNetworkMode = 'direct' | 'account_proxy'
 export type SyncSessionSource = 'reused' | 'auto_login'
@@ -51,7 +55,7 @@ const RATE_LIMIT_PATTERN = /l[ií]mite de intentos|too many attempts|try again l
 
 export function resolveSyncProxyMode(cliUseAccountProxy: boolean): boolean {
   if (cliUseAccountProxy) return true
-  return process.env.SYNC_USE_ACCOUNT_PROXY === 'true'
+  return shouldUseAccountProxyForJob('sync')
 }
 
 export function getSyncAccountDelayMs(): number {
@@ -89,8 +93,9 @@ function wrapLoginError(account: ProspectAccount, error: unknown): never {
  */
 export async function canAccessInbox(page: Page): Promise<boolean> {
   const base = getAirbnbBaseUrl()
-  await page.goto(`${base}/guest/messages`, { waitUntil: 'domcontentloaded' })
+  await gotoAndSettle(page, `${base}/guest/messages`)
   await dismissBlockingOverlays(page)
+  await ensureTravelerInboxFilter(page)
   await page.waitForTimeout(2_000)
   return !/\/login/.test(page.url())
 }
@@ -119,7 +124,8 @@ export async function openSyncAccountSession(
 ): Promise<SyncSessionResult> {
   const useAccountProxy = resolveSyncProxyMode(options.useAccountProxy)
   const networkMode: SyncNetworkMode = useAccountProxy ? 'account_proxy' : 'direct'
-  const proxy = useAccountProxy ? buildProxyOption(account) : undefined
+  // Sync puede activar proxy aunque PLAYWRIGHT_USE_ACCOUNT_PROXY esté off.
+  const proxy = buildProxyOption(account, { useProxy: useAccountProxy })
 
   const existingSession = sessionPathIfExists(account)
   let headed = resolveHeadedForSync(options, !existingSession)
@@ -139,6 +145,8 @@ export async function openSyncAccountSession(
       storageState: existingSession,
       ...getColombiaContextOptions(),
     })
+    applyContextTimeouts(context)
+    await installBandwidthSaver(context)
     const page = await context.newPage()
 
     if (await canAccessInbox(page)) {

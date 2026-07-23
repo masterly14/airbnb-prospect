@@ -50,7 +50,7 @@ import {
 } from '../src/scraping/playwright-context'
 import { dismissBlockingOverlays } from '../src/scraping/airbnb-scraper'
 import { isSessionValid } from '../src/scraping/session-utils'
-import { sendAlert } from '../src/notifications/notify'
+import { requestManualSessionRemediation } from '../src/accounts/manual-session-remediation'
 import {
   HarvestAuthMissingError,
   HarvestMutexBusyError,
@@ -203,10 +203,11 @@ async function quarantineAccount(
     reason,
   })
 
-  await sendAlert({
-    kind: 'SESSION_EXPIRED',
-    title: `Cuenta "${account.label}" fuera de rotación: ${reason}`,
-    details: { accountId: account.id, airbnbEmail: account.airbnbEmail },
+  await requestManualSessionRemediation({
+    account,
+    reason: 'session_expired',
+    message: reason,
+    job: 'outbound',
   })
 }
 
@@ -441,18 +442,43 @@ export async function runOutbound(
         report.accountsUsed.push(account.id)
       }
 
+      // Evita relanzar browser en bucle cuando hay leads globales (p. ej. Bogotá)
+      // pero ninguno para el market de esta cuenta (p. ej. Legacy = Medellín).
+      {
+        const marketsAtQuota = await getMarketsAtQuota()
+        const preview = await findEligibleOutboundLeads(1, {
+          excludeMarketsAtQuota: marketsAtQuota,
+          excludeLeadIds: [...excludedLeadIds],
+          market: account.market ?? undefined,
+        })
+        if (preview.length === 0) {
+          excludedAccountIds.add(account.id)
+          outboundLog('outbound.no_leads_for_account', {
+            accountId: account.id,
+            accountLabel: account.label,
+            market: account.market,
+          })
+          continue
+        }
+      }
+
       let browser: Browser | null = null
       let sentInWave = 0
 
       try {
         browser = await launchBrowserForAccount(account, {
           headless: process.env.OUTBOUND_HEADED !== 'true',
+          job: 'outbound',
         })
         const { page } = await prepareAccountContext(browser, account)
 
         let consecutiveFailures = 0
+        const maxSends = Math.min(
+          OPERATIONS.MSGS_PER_WAVE,
+          Number.parseInt(process.env.OUTBOUND_MAX_SENDS ?? String(OPERATIONS.MSGS_PER_WAVE), 10),
+        )
 
-        while (sentInWave < OPERATIONS.MSGS_PER_WAVE) {
+        while (sentInWave < maxSends) {
           const marketsAtQuota = await getMarketsAtQuota()
           const leads = await findEligibleOutboundLeads(1, {
             excludeMarketsAtQuota: marketsAtQuota,
@@ -460,7 +486,16 @@ export async function runOutbound(
             market: account.market ?? undefined,
           })
 
-          if (leads.length === 0) break
+          if (leads.length === 0) {
+            excludedAccountIds.add(account.id)
+            outboundLog('outbound.no_leads_for_account', {
+              accountId: account.id,
+              accountLabel: account.label,
+              market: account.market,
+              sentInWave,
+            })
+            break
+          }
 
           const outcome = await sendLeadWithAccount(page, leads[0], account, report)
 

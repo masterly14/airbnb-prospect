@@ -1,13 +1,27 @@
 import fs from 'fs'
 import path from 'path'
-import { chromium, type Browser, type BrowserContext, type LaunchOptions } from 'playwright'
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type LaunchOptions,
+  type Route,
+} from 'playwright'
 import { db, type ProspectAccount } from '@repo/db'
 import { decryptSecret, encryptSecret } from '@repo/crypto'
 import { getChromeChannelOption, getColombiaContextOptions } from './airbnb-context'
 import { outboundLog } from '../logging/outbound-logger'
+import { applyContextTimeouts } from './page-timing'
 
 /** storageState de Playwright (cookies + origins) como objeto en memoria. */
 export type StorageState = Awaited<ReturnType<BrowserContext['storageState']>>
+
+/**
+ * Job que abre Playwright. Define el default de proxy:
+ * - outbound / login → proxy si PLAYWRIGHT_USE_ACCOUNT_PROXY=true
+ * - harvest / inbound / sync → red directa (ahorra GB de Decodo)
+ */
+export type PlaywrightJob = 'outbound' | 'harvest' | 'inbound' | 'login' | 'sync'
 
 /** La sesión de la cuenta no existe en disco: requiere re-login manual. */
 export class AccountSessionMissingError extends Error {
@@ -33,13 +47,76 @@ export class AccountProxyConfigError extends Error {
   }
 }
 
+const JOB_PROXY_ENV: Record<PlaywrightJob, string> = {
+  outbound: 'OUTBOUND_USE_ACCOUNT_PROXY',
+  harvest: 'HARVEST_USE_ACCOUNT_PROXY',
+  inbound: 'INBOUND_USE_ACCOUNT_PROXY',
+  login: 'LOGIN_USE_ACCOUNT_PROXY',
+  sync: 'SYNC_USE_ACCOUNT_PROXY',
+}
+
+const HEAVY_RESOURCE_TYPES = new Set(['image', 'media', 'font'])
+
+const TRACKER_URL_RE =
+  /google-analytics|googletagmanager|googleadservices|doubleclick|facebook\.net|facebook\.com\/tr|hotjar|segment\.(io|com)|sentry\.io|newrelic|clarity\.ms|adservice|adsystem|scorecardresearch|bat\.bing/i
+
+/** CDN de fotos de Airbnb: bloquear aunque el resourceType no sea `image`. */
+const AIRBNB_IMAGE_CDN_RE = /muscache\.com\/(?:im\/|pictures\/|airbnb-platform-assets\/.*\.(?:png|jpe?g|webp|gif))/i
+
 export function accountSessionPath(accountId: string): string {
   return path.resolve(__dirname, `../../playwright/.auth/account-${accountId}.json`)
 }
 
-/** Por defecto red directa. Proxy residencial solo con PLAYWRIGHT_USE_ACCOUNT_PROXY=true. */
+/** Master switch legacy: habilita proxy por defecto en outbound/login. */
 export function shouldUseAccountProxy(): boolean {
   return process.env.PLAYWRIGHT_USE_ACCOUNT_PROXY === 'true'
+}
+
+/**
+ * ¿Este job debe salir por el proxy residencial de la cuenta?
+ *
+ * Override explícito por env del job (`true`/`false`). Si no hay override:
+ * - outbound / login → siguen `PLAYWRIGHT_USE_ACCOUNT_PROXY`
+ * - harvest / inbound / sync → `false` (ahorro de tráfico)
+ */
+export function shouldUseAccountProxyForJob(job: PlaywrightJob): boolean {
+  const explicit = process.env[JOB_PROXY_ENV[job]]?.trim().toLowerCase()
+  if (explicit === 'true') return true
+  if (explicit === 'false') return false
+
+  if (job === 'outbound' || job === 'login') {
+    return shouldUseAccountProxy()
+  }
+
+  return false
+}
+
+/** Bloqueo de assets pesados activo por defecto; desactivar con PLAYWRIGHT_BLOCK_HEAVY_ASSETS=false. */
+export function shouldBlockHeavyAssets(): boolean {
+  return process.env.PLAYWRIGHT_BLOCK_HEAVY_ASSETS !== 'false'
+}
+
+export function shouldBlockResource(resourceType: string, url: string): boolean {
+  if (HEAVY_RESOURCE_TYPES.has(resourceType)) return true
+  if (TRACKER_URL_RE.test(url)) return true
+  if (AIRBNB_IMAGE_CDN_RE.test(url)) return true
+  return false
+}
+
+/**
+ * Aborta imágenes, media, fuentes, trackers y CDN de fotos de Airbnb.
+ * El scrape/mensajería siguen funcionando con HTML + GraphQL + CSS/JS.
+ */
+export async function installBandwidthSaver(context: BrowserContext): Promise<void> {
+  if (!shouldBlockHeavyAssets()) return
+
+  await context.route('**/*', (route: Route) => {
+    const request = route.request()
+    if (shouldBlockResource(request.resourceType(), request.url())) {
+      return route.abort()
+    }
+    return route.continue()
+  })
 }
 
 /**
@@ -111,10 +188,17 @@ export async function persistAccountSessionState(
   })
 }
 
+export type BuildProxyOptions = {
+  /** Si se omite, usa el master `PLAYWRIGHT_USE_ACCOUNT_PROXY`. */
+  useProxy?: boolean
+}
+
 export function buildProxyOption(
   account: ProspectAccount,
+  options: BuildProxyOptions = {},
 ): NonNullable<LaunchOptions['proxy']> | undefined {
-  if (!shouldUseAccountProxy()) return undefined
+  const useProxy = options.useProxy ?? shouldUseAccountProxy()
+  if (!useProxy) return undefined
 
   if (!account.proxyHost || !account.proxyPort) return undefined
 
@@ -144,25 +228,37 @@ export function buildProxyOption(
   return proxy
 }
 
+export type LaunchAccountBrowserOptions = {
+  headless?: boolean
+  /** Job que define la política de proxy por defecto. */
+  job?: PlaywrightJob
+  /** Override explícito del proxy (tiene prioridad sobre `job`). */
+  useProxy?: boolean
+}
+
 /**
- * Un browser por cuenta, con el proxy a nivel de launch.
+ * Un browser por cuenta, con el proxy a nivel de launch cuando el job lo pide.
  *
  * Chromium ignora `proxy` por-contexto salvo que el browser se haya lanzado
  * con una opción proxy; lanzar por cuenta garantiza que cada cuenta sale por
- * su IP de EProxies (y la cascada es serial, así que el costo es marginal).
+ * su IP de Decodo (y la cascada es serial, así que el costo es marginal).
  */
 export async function launchBrowserForAccount(
   account: ProspectAccount,
-  options: { headless?: boolean } = {},
+  options: LaunchAccountBrowserOptions = {},
 ): Promise<Browser> {
-  const proxy = buildProxyOption(account)
+  const job = options.job ?? 'outbound'
+  const useProxy = options.useProxy ?? shouldUseAccountProxyForJob(job)
+  const proxy = buildProxyOption(account, { useProxy })
 
   outboundLog('playwright.browser_launch', {
     accountId: account.id,
     accountLabel: account.label,
-    networkMode: shouldUseAccountProxy() ? 'account_proxy' : 'direct',
-    proxyHost: shouldUseAccountProxy() ? (account.proxyHost ?? null) : null,
-    proxyPort: shouldUseAccountProxy() ? (account.proxyPort ?? null) : null,
+    job,
+    networkMode: useProxy ? 'account_proxy' : 'direct',
+    blockHeavyAssets: shouldBlockHeavyAssets(),
+    proxyHost: useProxy ? (account.proxyHost ?? null) : null,
+    proxyPort: useProxy ? (account.proxyPort ?? null) : null,
   })
 
   return chromium.launch({
@@ -182,10 +278,15 @@ export async function createContextForAccount(
     accountId: account.id,
     accountLabel: account.label,
     sessionSource: typeof storageState === 'string' ? 'file' : 'neon',
+    blockHeavyAssets: shouldBlockHeavyAssets(),
   })
 
-  return browser.newContext({
+  const context = await browser.newContext({
     storageState,
     ...getColombiaContextOptions(),
   })
+
+  applyContextTimeouts(context)
+  await installBandwidthSaver(context)
+  return context
 }

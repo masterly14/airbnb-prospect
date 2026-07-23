@@ -1,5 +1,11 @@
 /**
  * Demo del flujo post-respuesta sin Playwright (regex → mensaje 2 estático).
+ *
+ * Por defecto NO escribe en la DB. Usa --write solo si quieres simular un INBOUND.
+ *
+ * Uso:
+ *   npx tsx scripts/conversation-dry-run.ts <leadId> ["texto del host"]
+ *   npx tsx scripts/conversation-dry-run.ts <leadId> "No" --write
  */
 import dotenv from 'dotenv'
 import path from 'path'
@@ -14,10 +20,12 @@ import { buildCuriosityReplyMessage } from '../src/messaging/outbound-templates'
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') })
 
-const DEFAULT_HOST_REPLY = process.argv[3] ?? 'Dale, cuéntame más'
+const args = process.argv.slice(2).filter((a) => a !== '--write')
+const writeToDb = process.argv.includes('--write')
+const DEFAULT_HOST_REPLY = args[1] ?? 'Dale, cuéntame más'
 
 async function main() {
-  const leadId = process.argv[2]
+  const leadId = args[0]
 
   let id = leadId
   if (!id || id === '--pick') {
@@ -39,28 +47,53 @@ async function main() {
     process.exit(1)
   }
 
-  const hasInbound = await db.message.findFirst({
-    where: { leadId: id, direction: MessageDirection.INBOUND },
-  })
-  if (!hasInbound) {
-    await db.message.create({
-      data: { leadId: id, direction: MessageDirection.INBOUND, content: DEFAULT_HOST_REPLY },
+  let hostText = DEFAULT_HOST_REPLY
+
+  if (writeToDb) {
+    const hasInbound = await db.message.findFirst({
+      where: { leadId: id, direction: MessageDirection.INBOUND },
     })
-    await db.lead.update({
-      where: { id },
-      data: { status: LeadStatus.REPLIED_IN_PROGRESS, nextFollowUpAt: null },
-    })
-    console.log(`→ INBOUND simulado: "${DEFAULT_HOST_REPLY}"\n`)
+    if (!hasInbound) {
+      await db.message.create({
+        data: {
+          leadId: id,
+          direction: MessageDirection.INBOUND,
+          content: DEFAULT_HOST_REPLY,
+          aiIntent: 'SIMULATED_DRY_RUN',
+        },
+      })
+      await db.lead.update({
+        where: { id },
+        data: { status: LeadStatus.REPLIED_IN_PROGRESS, nextFollowUpAt: null },
+      })
+      console.log(`→ INBOUND simulado (--write): "${DEFAULT_HOST_REPLY}"\n`)
+    }
+  } else {
+    const ctx = await hydrateLeadAgentContext(id)
+    const lastInbound = [...(ctx?.recentMessages ?? [])]
+      .reverse()
+      .find((m) => m.direction === 'INBOUND' && m.aiIntent !== 'SIMULATED_DRY_RUN')
+    if (lastInbound?.content) {
+      hostText = lastInbound.content
+    } else {
+      console.log(
+        `(Sin INBOUND en CRM; clasificando texto de argumento/default. No se escribe en DB sin --write.)\n`,
+      )
+    }
   }
 
   const ctx = await hydrateLeadAgentContext(id)
-  if (!ctx) {
+  if (!ctx && writeToDb) {
     console.error('No se pudo hidratar contexto')
     process.exit(1)
   }
 
-  const lastInbound = [...ctx.recentMessages].reverse().find((m) => m.direction === 'INBOUND')
-  const hostText = lastInbound?.content ?? DEFAULT_HOST_REPLY
+  const lastInbound = [...(ctx?.recentMessages ?? [])]
+    .reverse()
+    .find((m) => m.direction === 'INBOUND')
+  if (writeToDb && lastInbound?.content) {
+    hostText = lastInbound.content
+  }
 
   console.log('========== RESPUESTA DEL HOST ==========')
   console.log(hostText)
@@ -75,7 +108,7 @@ async function main() {
     return
   }
 
-  const curiosityAlreadySent = ctx.recentMessages.some(
+  const curiosityAlreadySent = (ctx?.recentMessages ?? []).some(
     (m) => m.direction === 'OUTBOUND' && m.aiIntent === 'CURIOSITY_REPLY',
   )
 

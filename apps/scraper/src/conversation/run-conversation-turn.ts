@@ -1,5 +1,5 @@
 import type { Page } from 'playwright'
-import { lastInboundMessage } from '@repo/ai'
+import { lastHostReplyForTurn } from '../messaging/thread-message-filters'
 import { conversationLog } from '../logging/conversation-logger'
 import { sendThreadOutboundMessage } from '../messaging/airbnb-messaging'
 import { buildCuriosityReplyMessage } from '../messaging/outbound-templates'
@@ -36,6 +36,14 @@ export type ConversationTurnResult = {
   error?: string
 }
 
+export type ConversationTurnOptions = {
+  /**
+   * Respuesta del host recién leída en Airbnb.
+   * Tiene prioridad sobre el CRM (evita dry-runs / ruido viejo).
+   */
+  scrapedHostReply?: string | null
+}
+
 function alreadySentCuriosityReply(
   messages: Array<{ direction: string; aiIntent?: string | null }>,
 ): boolean {
@@ -56,6 +64,7 @@ function alreadySentCuriosityReply(
 export async function runConversationTurn(
   page: Page,
   leadId: string,
+  options: ConversationTurnOptions = {},
 ): Promise<ConversationTurnResult> {
   conversationLog('conversation.turn.start', { leadId })
 
@@ -77,13 +86,22 @@ export async function runConversationTurn(
       return { leadId, outcome: 'skipped_no_thread' }
     }
 
-    const lastInbound = lastInboundMessage(context)
-    if (!lastInbound?.content.trim()) {
+    const scrapedReply = options.scrapedHostReply?.trim() || null
+    const lastInbound = lastHostReplyForTurn(context.recentMessages)
+    const hostText = scrapedReply || lastInbound?.content?.trim() || ''
+    if (!hostText) {
       conversationLog('conversation.turn.skip', { leadId, reason: 'no_inbound' })
       return { leadId, outcome: 'skipped_no_inbound' }
     }
 
-    const hostText = lastInbound.content
+    if (scrapedReply) {
+      conversationLog('conversation.host_reply.source', {
+        leadId,
+        source: 'airbnb_scrape',
+        preview: scrapedReply.slice(0, 120),
+      })
+    }
+
     const classification = classifyHostReply(hostText)
     const aiTag = intentToAiTag(classification.intent)
 

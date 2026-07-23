@@ -141,6 +141,7 @@ async function pollAccountInbox(
   try {
     session = await openAccountBrowserSessionWithLogin(account, {
       headless: process.env.INBOUND_HEADED !== 'true',
+      job: 'inbound',
     })
   } catch (error) {
     inboundLog('inbound.account_session_failed', {

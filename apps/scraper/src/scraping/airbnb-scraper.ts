@@ -270,18 +270,21 @@ async function parseListingFromLink(
   const card = link.locator('xpath=ancestor::div[@itemprop="itemListElement"][1]')
   const cardScope = (await card.count()) > 0 ? card : link.locator('xpath=ancestor::div[3]')
 
-  const title =
-    (await link.getAttribute('aria-label')) ??
-    (await cardScope.locator('[data-testid="listing-card-title"]').innerText().catch(() => '')) ??
-    (await link.innerText().catch(() => '')) ??
-    'Unknown'
+  // Preferir el título de la card sobre aria-label: el aria-label suele mezclar
+  // ubicación, precio y meta, o heredar texto de una card vecina.
+  const cardTitle = (
+    await cardScope.locator('[data-testid="listing-card-title"]').innerText().catch(() => '')
+  ).trim()
+  const linkText = (await link.innerText().catch(() => '')).trim()
+  const ariaLabel = (await link.getAttribute('aria-label'))?.trim() ?? ''
+  const title = (cardTitle || linkText || ariaLabel || 'Unknown').split('\n')[0]
 
   const cardText = await cardScope.innerText().catch(() => '')
   const priceMatch = cardText.match(/\$[\d,.]+(?:\s*\w+)?(?:\s+for\s+\d+\s+nights?)?/i)
   const ratingMatch = cardText.match(/\b(\d\.\d{1,2})\b/)
 
   return {
-    title: title.trim().split('\n')[0],
+    title: title.trim(),
     price: priceMatch?.[0] ?? 'N/A',
     url,
     rating: ratingMatch?.[1],

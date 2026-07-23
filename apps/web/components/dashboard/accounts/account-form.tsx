@@ -81,16 +81,20 @@ export function AccountForm({ onCreated }: AccountFormProps) {
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="proxyHost">Proxy host (EProxies)</Label>
-          <Input id="proxyHost" name="proxyHost" placeholder="gate.eproxies.com" />
+          <Label htmlFor="proxyHost">Proxy host (Decodo)</Label>
+          <Input id="proxyHost" name="proxyHost" placeholder="gate.decodo.com" />
         </div>
         <div className="space-y-2">
           <Label htmlFor="proxyPort">Proxy puerto</Label>
-          <Input id="proxyPort" name="proxyPort" type="number" placeholder="8080" />
+          <Input id="proxyPort" name="proxyPort" type="number" placeholder="7000" />
         </div>
         <div className="space-y-2">
           <Label htmlFor="proxyUser">Proxy usuario</Label>
-          <Input id="proxyUser" name="proxyUser" />
+          <Input
+            id="proxyUser"
+            name="proxyUser"
+            placeholder="user-…-country-co-session-…-sessionduration-1440"
+          />
         </div>
         <div className="space-y-2">
           <Label htmlFor="proxyPass">Proxy contraseña</Label>

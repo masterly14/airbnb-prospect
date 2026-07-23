@@ -25,6 +25,7 @@ describe('classifyBlockType', () => {
 
   it('maps captcha copy to CAPTCHA', () => {
     assert.equal(classifyBlockType('Please complete the captcha challenge'), BlockType.CAPTCHA)
+    assert.equal(classifyBlockType('Verificación de seguridad'), BlockType.CAPTCHA)
   })
 
   it('falls back to OTHER', () => {

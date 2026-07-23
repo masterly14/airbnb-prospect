@@ -13,8 +13,13 @@ function resolveFromAddress(): string | null {
   return process.env.RESEND_FROM?.trim() || null
 }
 
+/** Destinatario de alertas operativas (captcha / sesión manual / cooldown). */
 function resolveAlertRecipient(): string {
-  return process.env.HANDOFF_EMAIL?.trim() || 'svaron066@gmail.com'
+  return (
+    process.env.OPERATIONAL_ALERT_EMAIL?.trim() ||
+    process.env.HANDOFF_EMAIL?.trim() ||
+    'svaron066@gmail.com'
+  )
 }
 
 export async function sendResendEmail(input: ResendEmailInput): Promise<ResendEmailResult> {

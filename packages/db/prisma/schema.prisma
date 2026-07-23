@@ -180,10 +180,13 @@ model ProspectAccount {
   composioUserId      String?
   composioConnectionId String?
   composioConnectedAt DateTime?
-  proxyHost           String?
+  proxyHost           String?       // Decodo endpoint (gate.decodo.com)
   proxyPort           Int?
-  proxyUser           String?
+  proxyUser           String?       // user-…-session-…-sessionduration-…
   proxyPassEnc        String?
+  proxyProvider       String?       // "decodo"
+  proxySessionId      String?       // sticky session id único por cuenta
+  proxyCountry        String?       // ISO-2, p.ej. "co"
   sessionPath         String?
   sessionStateEnc     String?       // storageState (cookies/origins) cifrado; sesión sin volumen
   market              String?       // Ciudad objetivo de prospección (Bogotá, Medellín)

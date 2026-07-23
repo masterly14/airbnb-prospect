@@ -85,9 +85,12 @@ export async function submitTwoFactorCode(page: Page, code: string) {
   await otpInput.waitFor({ state: 'visible', timeout: 10_000 });
   await otpInput.click();
   await otpInput.fill(code);
-  authLog('2FA', 'Código ingresado — esperando confirmación de Airbnb');
+  authLog('2FA', 'Código ingresado — esperando que Airbnb cierre el modal OTP');
 
   const heading = twoFactorHeading(page);
+  const errorBanner = modal.getByText(
+    /c[oó]digo incorrecto|invalid code|try again|int[eé]ntalo de nuevo|expired|caduc/i,
+  );
 
   await Promise.race([
     heading.waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {}),
@@ -99,5 +102,11 @@ export async function submitTwoFactorCode(page: Page, code: string) {
     await heading.waitFor({ state: 'hidden', timeout: 20_000 });
   });
 
-  authLog('2FA', 'Modal de verificación cerrado');
+  if (await errorBanner.isVisible({ timeout: 1_500 }).catch(() => false)) {
+    const msg = (await errorBanner.innerText().catch(() => 'código inválido')).trim();
+    throw new Error(`Airbnb rechazó el OTP: ${msg}`);
+  }
+
+  // Cerrar el modal OTP ≠ sesión iniciada. El caller debe validar el header.
+  authLog('2FA', 'Modal OTP cerrado (aún hay que confirmar sesión en el header)');
 }
